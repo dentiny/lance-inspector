@@ -41,6 +41,7 @@ pub struct AppState {
 pub struct ConnectedDataset {
     pub dataset: Arc<Dataset>,
     pub dataset_uri: String,
+    pub reference: String,
 }
 
 pub struct ApiError(anyhow::Error);
@@ -84,6 +85,7 @@ pub async fn dataset_info(
 #[derive(Debug, Deserialize)]
 pub struct ConnectRequest {
     uri: String,
+    reference: Option<String>,
 }
 
 pub async fn connect_dataset(
@@ -98,17 +100,82 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<DatasetInf
     if uri.is_empty() {
         bail!("dataset location cannot be empty");
     }
-    let dataset = Arc::new(
-        Dataset::open(uri)
-            .await
-            .with_context(|| format!("failed to open Lance dataset {uri}"))?,
-    );
+    let reference = request.reference.as_deref().unwrap_or("main").trim();
+    let reference = if reference.is_empty() {
+        "main"
+    } else {
+        reference
+    };
+    let root = Dataset::open(uri)
+        .await
+        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
+    let dataset = Arc::new(resolve_reference(root, reference).await?);
     let connection = ConnectedDataset {
         dataset,
         dataset_uri: uri.to_string(),
+        reference: reference.to_string(),
     };
     *state.connection.write().await = Some(connection.clone());
     build_dataset_info(&connection).await
+}
+
+async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
+    if reference.eq_ignore_ascii_case("main") {
+        return Ok(root);
+    }
+    if let Ok(version) = reference.parse::<u64>() {
+        return root
+            .checkout_version(version)
+            .await
+            .with_context(|| format!("failed to check out version {version}"));
+    }
+    if let Some(version) = reference.strip_prefix("version:") {
+        let version = version
+            .parse::<u64>()
+            .with_context(|| format!("invalid version reference {reference}"))?;
+        return root
+            .checkout_version(version)
+            .await
+            .with_context(|| format!("failed to check out version {version}"));
+    }
+    if let Some(branch) = reference.strip_prefix("branch:") {
+        return root
+            .checkout_branch(branch)
+            .await
+            .with_context(|| format!("failed to check out branch {branch}"));
+    }
+    if let Some(tag) = reference.strip_prefix("tag:") {
+        return root
+            .checkout_version(tag)
+            .await
+            .with_context(|| format!("failed to check out tag {tag}"));
+    }
+    if let Some((branch, version)) = reference.rsplit_once(':')
+        && let Ok(version) = version.parse::<u64>()
+    {
+        return root
+            .checkout_version((branch, version))
+            .await
+            .with_context(|| format!("failed to check out {branch} version {version}"));
+    }
+
+    let branches = root.list_branches().await?;
+    if branches.contains_key(reference) {
+        return root
+            .checkout_branch(reference)
+            .await
+            .with_context(|| format!("failed to check out branch {reference}"));
+    }
+    let tags = root.tags().list().await?;
+    if tags.contains_key(reference) {
+        return root
+            .checkout_version(reference)
+            .await
+            .with_context(|| format!("failed to check out tag {reference}"));
+    }
+    bail!(
+        "reference '{reference}' was not found as a branch or tag; use a numeric version, branch:<name>, or tag:<name>"
+    )
 }
 
 async fn connected(state: &AppState) -> Result<ConnectedDataset> {
@@ -218,6 +285,7 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
     let manifest_location = dataset.manifest_location();
     Ok(DatasetInfo {
         uri: connection.dataset_uri.clone(),
+        reference: connection.reference.clone(),
         version: manifest.version,
         branch: manifest
             .branch

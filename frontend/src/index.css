@@ -89,7 +89,7 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
   margin-right: 10px;
 }
 .top-meta { height: 100%; display: flex; align-items: center; }
-.top-meta span, .change-dataset {
+.top-meta span, .change-dataset, .reference-switch {
   height: 100%;
   padding: 0 16px;
   display: flex;
@@ -99,8 +99,9 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
   color: var(--muted);
   font: 12px var(--mono);
 }
-.change-dataset { background: transparent; border: 0; cursor: pointer; }
-.change-dataset:hover { color: var(--green); background: var(--green-dim); }
+.change-dataset, .reference-switch { background: transparent; border: 0; cursor: pointer; }
+.change-dataset:hover, .reference-switch:hover { color: var(--green); background: var(--green-dim); }
+.version-switch { color: var(--faint); }
 
 .sidebar {
   grid-row: 2;
@@ -307,7 +308,7 @@ td code { white-space: nowrap; font: inherit; }
   backdrop-filter: blur(8px);
 }
 .connector-card {
-  width: min(680px, calc(100vw - 60px));
+  width: min(820px, calc(100vw - 60px));
   padding: 34px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -319,13 +320,14 @@ td code { white-space: nowrap; font: inherit; }
 .connector-card h1 { margin: 8px 0 9px; color: #f1f5f9; font-size: 29px; letter-spacing: -.035em; }
 .connector-card > p { margin: 0 0 28px; color: var(--muted); font-size: 13px; }
 .connector-card form label { display: block; margin-bottom: 8px; color: var(--muted); font: 9px var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+.connector-fields { display: grid; grid-template-columns: minmax(280px, 1.5fr) minmax(190px, .8fr) auto; align-items: end; gap: 10px; }
 .connector-input {
   height: 52px;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(0, 1fr);
   align-items: center;
   gap: 7px;
-  padding: 5px 5px 5px 14px;
+  padding: 5px 14px;
   border: 1px solid #34404d;
   border-radius: 7px;
   background: #0b0f14;
@@ -342,11 +344,11 @@ td code { white-space: nowrap; font: inherit; }
   font: 12px var(--mono);
 }
 .connector-input input::placeholder { color: #485360; }
-.connector-input button {
-  height: 40px;
+.connector-submit {
+  height: 52px;
   min-width: 108px;
   border: 1px solid rgba(117, 211, 166, .28);
-  border-radius: 5px;
+  border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -357,13 +359,21 @@ td code { white-space: nowrap; font: inherit; }
   font: 11px var(--mono);
   font-weight: 700;
 }
-.connector-input button:disabled { opacity: .45; cursor: default; }
+.connector-submit:disabled { opacity: .45; cursor: default; }
 .connector-error { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: 5px; color: var(--red); background: var(--red-dim); font: 10px/1.5 var(--mono); }
 .connector-hints { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 25px; }
 .connector-hints span { padding: 11px; border: 1px solid var(--line-soft); border-radius: 5px; color: var(--faint); font: 9px/1.5 var(--mono); }
 .connector-hints strong { display: block; color: var(--muted); margin-bottom: 2px; }
 .connector-cancel { display: block; margin: 18px auto 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--mono); }
 .connector-cancel:hover { color: var(--text); }
+.reference-card { width: min(560px, calc(100vw - 60px)); }
+.reference-card .connector-brand { margin-bottom: 32px; }
+.reference-dataset-uri { padding: 9px 11px; border: 1px solid var(--line-soft); border-radius: 5px; background: #0b0f14; font: 10px var(--mono) !important; word-break: break-all; }
+.reference-card form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.reference-submit { min-width: 145px; }
+.reference-examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 15px; }
+.reference-examples::before { content: "Examples"; color: var(--faint); margin-right: 3px; font: 8px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+.reference-examples code { padding: 4px 7px; border-radius: 4px; color: var(--cyan); background: rgba(98, 200, 212, .08); font: 9px var(--mono); }
 
 @media (max-width: 1200px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
