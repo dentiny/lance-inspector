@@ -11,6 +11,7 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct DatasetInfo {
     pub uri: String,
+    pub reference: String,
     pub version: u64,
     pub branch: String,
     pub rows: usize,

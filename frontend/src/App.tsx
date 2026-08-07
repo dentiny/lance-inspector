@@ -57,6 +57,7 @@ type Fragment = {
 
 type DatasetInfo = {
   uri: string
+  reference: string
   version: number
   branch: string
   rows: number
@@ -548,14 +549,17 @@ function RawFileView({ file }: { file: FileEntry }) {
 
 function DatasetConnector({
   currentUri,
+  currentReference,
   onConnected,
   onCancel,
 }: {
   currentUri?: string
+  currentReference?: string
   onConnected: (dataset: DatasetInfo) => void
   onCancel?: () => void
 }) {
   const [uri, setUri] = useState(currentUri ?? '')
+  const [reference, setReference] = useState(currentReference ?? 'main')
   const [error, setError] = useState('')
   const [connecting, setConnecting] = useState(false)
 
@@ -568,7 +572,7 @@ function DatasetConnector({
     fetch('/api/dataset/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uri: location }),
+      body: JSON.stringify({ uri: location, reference: reference.trim() || 'main' }),
     })
       .then(async (response) => {
         const body = await response.json()
@@ -590,18 +594,35 @@ function DatasetConnector({
         <h1>Inspect Lance storage</h1>
         <p>Enter a local dataset path or an S3 URI accessible to this server.</p>
         <form onSubmit={submit}>
-          <label htmlFor="dataset-location">Dataset location</label>
-          <div className="connector-input">
-            <HardDrive size={17} />
-            <input
-              id="dataset-location"
-              value={uri}
-              onChange={(event) => setUri(event.target.value)}
-              placeholder="/data/example.lance or s3://bucket/path"
-              autoFocus
-              spellCheck={false}
-            />
-            <button type="submit" disabled={connecting || !uri.trim()}>
+          <div className="connector-fields">
+            <div className="connector-control">
+              <label htmlFor="dataset-location">Dataset location</label>
+              <div className="connector-input">
+                <HardDrive size={17} />
+                <input
+                  id="dataset-location"
+                  value={uri}
+                  onChange={(event) => setUri(event.target.value)}
+                  placeholder="/data/example.lance or s3://bucket/path"
+                  autoFocus
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+            <div className="connector-control reference-control">
+              <label htmlFor="dataset-reference">Branch, version, or tag</label>
+              <div className="connector-input">
+                <GitBranch size={17} />
+                <input
+                  id="dataset-reference"
+                  value={reference}
+                  onChange={(event) => setReference(event.target.value)}
+                  placeholder="main"
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+            <button className="connector-submit" type="submit" disabled={connecting || !uri.trim()}>
               {connecting ? <RefreshCw className="spin" size={16} /> : <ArrowRight size={16} />}
               {connecting ? 'Opening' : 'Inspect'}
             </button>
@@ -609,11 +630,81 @@ function DatasetConnector({
         </form>
         {error && <div className="connector-error"><CircleAlert size={15} />{error}</div>}
         <div className="connector-hints">
-          <span><strong>Local</strong> mounted paths and volumes</span>
+          <span><strong>Reference</strong> main, branch, version, or tag</span>
           <span><strong>Cloud</strong> S3 with server credentials</span>
           <span><strong>Safety</strong> read-only inspection</span>
         </div>
         {onCancel && <button className="connector-cancel" onClick={onCancel}>Cancel</button>}
+      </section>
+    </div>
+  )
+}
+
+function ReferenceSwitcher({
+  dataset,
+  onConnected,
+  onCancel,
+}: {
+  dataset: DatasetInfo
+  onConnected: (dataset: DatasetInfo) => void
+  onCancel: () => void
+}) {
+  const [reference, setReference] = useState(dataset.reference)
+  const [error, setError] = useState('')
+  const [connecting, setConnecting] = useState(false)
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault()
+    const nextReference = reference.trim() || 'main'
+    setConnecting(true)
+    setError('')
+    fetch('/api/dataset/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: dataset.uri, reference: nextReference }),
+    })
+      .then(async (response) => {
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error ?? response.statusText)
+        return body as DatasetInfo
+      })
+      .then(onConnected)
+      .catch((reason: Error) => setError(reason.message))
+      .finally(() => setConnecting(false))
+  }
+
+  return (
+    <div className="connector-overlay">
+      <section className="connector-card reference-card">
+        <div className="connector-brand"><span className="brand-mark"><GitBranch /></span><strong>Dataset reference</strong></div>
+        <span className="eyebrow">Switch snapshot</span>
+        <h1>Choose a branch, version, or tag</h1>
+        <p className="reference-dataset-uri">{dataset.uri}</p>
+        <form onSubmit={submit}>
+          <div className="connector-control">
+            <label htmlFor="switch-reference">Reference</label>
+            <div className="connector-input">
+              <GitBranch size={17} />
+              <input
+                id="switch-reference"
+                value={reference}
+                onChange={(event) => setReference(event.target.value)}
+                placeholder="main"
+                autoFocus
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <button className="connector-submit reference-submit" type="submit" disabled={connecting}>
+            {connecting ? <RefreshCw className="spin" size={16} /> : <ArrowRight size={16} />}
+            {connecting ? 'Switching' : 'Switch reference'}
+          </button>
+        </form>
+        <div className="reference-examples">
+          <code>main</code><code>test-branch</code><code>2</code><code>tag:v1</code><code>test-branch:2</code>
+        </div>
+        {error && <div className="connector-error"><CircleAlert size={15} />{error}</div>}
+        <button className="connector-cancel" onClick={onCancel}>Cancel</button>
       </section>
     </div>
   )
@@ -625,6 +716,7 @@ function App() {
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
   const [error, setError] = useState('')
   const [showConnector, setShowConnector] = useState(true)
+  const [showReference, setShowReference] = useState(false)
   const tree = useMemo(() => buildTree(files), [files])
 
   const connected = async (dataset: DatasetInfo) => {
@@ -636,6 +728,7 @@ function App() {
       setFiles(entries)
       setSelection({ type: 'overview' })
       setShowConnector(false)
+      setShowReference(false)
       setError('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -663,7 +756,8 @@ function App() {
         <div className="dataset-uri"><span className="status-dot" />{info.uri}</div>
         <div className="top-meta">
           <button className="change-dataset" onClick={() => setShowConnector(true)}><HardDrive size={14} />Open dataset</button>
-          <span><GitBranch size={14} />{info.branch}</span><span>v{info.version}</span>
+          <button className="reference-switch" onClick={() => setShowReference(true)} title="Change branch, version, or tag"><GitBranch size={14} />{info.reference}</button>
+          <button className="reference-switch version-switch" onClick={() => setShowReference(true)} title="Checked-out Lance manifest version">version {info.version}</button>
         </div>
       </header>
       <aside className="sidebar">
@@ -691,7 +785,8 @@ function App() {
         {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} />}
         {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && <RawFileView file={selectedFile} />}
       </main>
-      {showConnector && <DatasetConnector currentUri={info.uri} onConnected={connected} onCancel={() => setShowConnector(false)} />}
+      {showConnector && <DatasetConnector currentUri={info.uri} currentReference={info.reference} onConnected={connected} onCancel={() => setShowConnector(false)} />}
+      {showReference && <ReferenceSwitcher dataset={info} onConnected={connected} onCancel={() => setShowReference(false)} />}
     </div>
   )
 }
