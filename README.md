@@ -105,6 +105,8 @@ available, and associated tags. A branch also identifies the parent branch and
 version from which it forked, making branch ancestry visible without inspecting
 the `_refs` files manually.
 
+![Snapshot lineage browser showing branches and versions](docs/images/snapshot-lineage.png)
+
 Select any version or tag to open that immutable dataset snapshot. The file
 hierarchy, manifest, fragments, rows, transactions, deletion vectors, and media
 previews then reflect that selected snapshot.
