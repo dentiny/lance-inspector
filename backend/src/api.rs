@@ -24,8 +24,9 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 use crate::models::{
-    BranchView, DataFileView, DatasetInfo, DeletionView, FileEntry, FilePreview, FragmentView,
-    HealthResponse, ManifestView, MediaColumn, RowsResponse, SchemaField, TransactionView,
+    BranchHistory, BranchView, DataFileView, DatasetInfo, DeletionView, FileEntry, FilePreview,
+    FragmentView, HealthResponse, ManifestView, MediaColumn, ReferenceCatalog, RowsResponse,
+    SchemaField, TagView, TransactionView, VersionView,
 };
 
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
@@ -86,6 +87,83 @@ pub async fn dataset_info(
 pub struct ConnectRequest {
     uri: String,
     reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverRequest {
+    uri: String,
+}
+
+pub async fn discover_dataset(
+    Json(request): Json<DiscoverRequest>,
+) -> Result<Json<ReferenceCatalog>, ApiError> {
+    discover(request).await.map(Json).map_err(ApiError)
+}
+
+async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
+    let uri = request.uri.trim();
+    if uri.is_empty() {
+        bail!("dataset location cannot be empty");
+    }
+    let root = Dataset::open(uri)
+        .await
+        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
+    let branch_contents = root.list_branches().await?;
+    let tag_contents = root.tags().list().await?;
+
+    let mut tags: Vec<_> = tag_contents
+        .into_iter()
+        .map(|(name, contents)| TagView {
+            name,
+            branch: contents.branch.unwrap_or_else(|| "main".to_string()),
+            version: contents.version,
+        })
+        .collect();
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut branch_names: Vec<_> = branch_contents.keys().cloned().collect();
+    branch_names.sort();
+    branch_names.insert(0, "main".to_string());
+
+    let mut branches = Vec::with_capacity(branch_names.len());
+    for name in branch_names {
+        let dataset = if name == "main" {
+            root.clone()
+        } else {
+            root.checkout_branch(&name).await?
+        };
+        let versions = dataset
+            .versions()
+            .await?
+            .into_iter()
+            .map(|version| VersionView {
+                version: version.version,
+                timestamp: version.timestamp.to_rfc3339(),
+                total_rows: version
+                    .metadata
+                    .get("total_rows")
+                    .and_then(|value| value.parse().ok()),
+                tags: tags
+                    .iter()
+                    .filter(|tag| tag.branch == name && tag.version == version.version)
+                    .map(|tag| tag.name.clone())
+                    .collect(),
+            })
+            .collect();
+        let metadata = branch_contents.get(&name);
+        branches.push(BranchHistory {
+            name,
+            parent_branch: metadata.and_then(|branch| branch.parent_branch.clone()),
+            parent_version: metadata.map(|branch| branch.parent_version),
+            versions,
+        });
+    }
+
+    Ok(ReferenceCatalog {
+        uri: uri.to_string(),
+        branches,
+        tags,
+    })
 }
 
 pub async fn connect_dataset(

@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/dataset", get(api::dataset_info))
+        .route("/dataset/references", post(api::discover_dataset))
         .route("/dataset/connect", post(api::connect_dataset))
         .route("/files", get(api::files))
         .route("/file", get(api::file_preview))
