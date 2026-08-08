@@ -2,8 +2,8 @@
 
 Lance Inspector is a read-only web application for understanding what is
 physically stored inside a Lance dataset. It connects the logical table view
-with manifests, fragments, transactions, deletion vectors, branches, and the
-underlying object hierarchy.
+with manifests, fragments, transactions, deletion vectors, snapshot lineage,
+and the underlying object hierarchy.
 
 It runs locally, in Docker, or on Kubernetes against a mounted dataset or an S3
 URI. No database or catalog service is required.
@@ -40,8 +40,10 @@ dashboard or dataset editor.
   with native browser controls.
 - Supports HTTP byte ranges for efficient media streaming.
 - Uses the same Lance object-store integration for local paths and S3.
-- Opens the latest `main` snapshot by default, with explicit branch, version,
-  branch-version, and tag selection.
+- Discovers snapshot lineage before opening a dataset: branches, version
+  histories, fork points, timestamps, row counts, and tags.
+- Opens any discovered branch version or tag directly and switches snapshots
+  from the loaded-dataset header.
 - Exposes no mutation endpoints and is designed to run with read-only storage.
 
 ### Multimodal row inspection
@@ -54,11 +56,15 @@ dashboard or dataset editor.
 
 ## Current scope
 
-The initial version inspects one active dataset snapshot at a time. Users can
-open or switch datasets and references from the browser without restarting the
-server. Row previews show live rows, while deleted physical offsets are
-presented in the associated fragment's deletion-vector view. Media rendering
-currently targets Lance Blob V2 columns.
+The inspector displays lineage for dataset snapshots and inspects one selected
+snapshot at a time. Users can open or switch datasets and references from the
+browser without restarting the server. Row previews show live rows, while
+deleted physical offsets are presented in the associated fragment's
+deletion-vector view. Media rendering currently targets Lance Blob V2 columns.
+
+Snapshot lineage currently covers branch ancestry, manifest versions, and
+tags. It does not yet provide column-level or row-level provenance across
+versions.
 
 Dataset locations are opened with the server's filesystem and cloud
 credentials. Deploy the inspector only for trusted users or place it behind
@@ -85,29 +91,28 @@ cargo run --manifest-path backend/Cargo.toml
 ```
 
 Open [http://localhost:8080](http://localhost:8080), enter a local path such as
-`/tmp/hjiang_test_lance` or an S3 URI, and select **Inspect**. The reference
-defaults to `main`; it also accepts a branch name, numeric version, tag name,
-`branch:<name>`, `tag:<name>`, or `<branch>:<version>`.
+`/tmp/hjiang_test_lance` or an S3 URI, and select **Continue**. The inspector
+then lists the dataset's branches, versions, and tags so you can choose a
+snapshot without knowing its reference name in advance.
 
 ![Dataset location input in the web UI](docs/images/dataset-connection.png)
 
-## Select and switch dataset references
+## Browse snapshot lineage
 
-The reference field defaults to `main`, which opens the latest main-branch
-manifest. Supported reference forms are:
+After reading the dataset location, the landing flow displays each branch and
+its manifest-version history. Every version shows its timestamp, row count when
+available, and associated tags. A branch also identifies the parent branch and
+version from which it forked, making branch ancestry visible without inspecting
+the `_refs` files manually.
 
-- `main` — latest main branch.
-- `test-branch` or `branch:test-branch` — latest version on a branch.
-- `2` or `version:2` — a historical version on main.
-- `test-branch:2` — a specific version on a branch.
-- `release-v1` or `tag:release-v1` — a tagged snapshot. When an unqualified
-  name exists as both a branch and tag, the branch takes precedence; use
-  `tag:` to select the tag explicitly.
+Select any version or tag to open that immutable dataset snapshot. The file
+hierarchy, manifest, fragments, rows, transactions, deletion vectors, and media
+previews then reflect that selected snapshot.
 
-After a dataset loads, the header shows both the selected reference and its
-resolved Lance manifest version, for example **main · version 2**. Select either
-value to open the reference switcher. This changes branch, version, or tag
-without requiring the dataset location again or restarting the server.
+After a dataset loads, the header shows the checked-out branch and resolved
+manifest version, for example **main · version 2**. Select it to open the same
+lineage browser as a dropdown overlay and switch snapshots without entering the
+dataset location again or restarting the server.
 
 The same workflow is available through Make:
 
@@ -159,6 +164,7 @@ kubectl port-forward service/lance-inspector 8080:80
 ## API
 
 - `GET /api/dataset` — schema, active manifest, fragments, branches, deletions
+- `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
 - `POST /api/dataset/connect` — open a local/S3 dataset at a branch, version, or tag
 - `GET /api/files` — recursive storage hierarchy for local paths or S3
 - `GET /api/transaction?path=...` — decoded protobuf transaction and operation

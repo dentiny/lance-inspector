@@ -86,6 +86,36 @@ pub struct BranchView {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ReferenceCatalog {
+    pub uri: String,
+    pub branches: Vec<BranchHistory>,
+    pub tags: Vec<TagView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BranchHistory {
+    pub name: String,
+    pub parent_branch: Option<String>,
+    pub parent_version: Option<u64>,
+    pub versions: Vec<VersionView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VersionView {
+    pub version: u64,
+    pub timestamp: String,
+    pub total_rows: Option<u64>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagView {
+    pub name: String,
+    pub branch: String,
+    pub version: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FileEntry {
     pub path: String,
     pub size: u64,

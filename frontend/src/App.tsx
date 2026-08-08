@@ -15,11 +15,13 @@ import {
   FolderOpen,
   GitBranch,
   HardDrive,
+  History,
   Image as ImageIcon,
   Layers3,
   RefreshCw,
   Rows3,
   Search,
+  Tag,
 } from 'lucide-react'
 
 type SchemaField = {
@@ -65,6 +67,22 @@ type DatasetInfo = {
   manifest: Record<string, unknown>
   fragments: Fragment[]
   branches: { name: string; parent_branch: string | null; parent_version: number }[]
+}
+
+type ReferenceCatalog = {
+  uri: string
+  branches: {
+    name: string
+    parent_branch: string | null
+    parent_version: number | null
+    versions: {
+      version: number
+      timestamp: string
+      total_rows: number | null
+      tags: string[]
+    }[]
+  }[]
+  tags: { name: string; branch: string; version: number }[]
 }
 
 type FileEntry = {
@@ -549,41 +567,36 @@ function RawFileView({ file }: { file: FileEntry }) {
 
 function DatasetConnector({
   currentUri,
-  currentReference,
-  onConnected,
+  onDiscovered,
   onCancel,
 }: {
   currentUri?: string
-  currentReference?: string
-  onConnected: (dataset: DatasetInfo) => void
+  onDiscovered: (catalog: ReferenceCatalog) => void
   onCancel?: () => void
 }) {
   const [uri, setUri] = useState(currentUri ?? '')
-  const [reference, setReference] = useState(currentReference ?? 'main')
   const [error, setError] = useState('')
-  const [connecting, setConnecting] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault()
     const location = uri.trim()
     if (!location) return
-    setConnecting(true)
+    setDiscovering(true)
     setError('')
-    fetch('/api/dataset/connect', {
+    fetch('/api/dataset/references', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uri: location, reference: reference.trim() || 'main' }),
+      body: JSON.stringify({ uri: location }),
     })
       .then(async (response) => {
         const body = await response.json()
         if (!response.ok) throw new Error(body.error ?? response.statusText)
-        return body as DatasetInfo
+        return body as ReferenceCatalog
       })
-      .then((dataset) => {
-        onConnected(dataset)
-      })
+      .then(onDiscovered)
       .catch((reason: Error) => setError(reason.message))
-      .finally(() => setConnecting(false))
+      .finally(() => setDiscovering(false))
   }
 
   return (
@@ -609,28 +622,15 @@ function DatasetConnector({
                 />
               </div>
             </div>
-            <div className="connector-control reference-control">
-              <label htmlFor="dataset-reference">Branch, version, or tag</label>
-              <div className="connector-input">
-                <GitBranch size={17} />
-                <input
-                  id="dataset-reference"
-                  value={reference}
-                  onChange={(event) => setReference(event.target.value)}
-                  placeholder="main"
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <button className="connector-submit" type="submit" disabled={connecting || !uri.trim()}>
-              {connecting ? <RefreshCw className="spin" size={16} /> : <ArrowRight size={16} />}
-              {connecting ? 'Opening' : 'Inspect'}
+            <button className="connector-submit" type="submit" disabled={discovering || !uri.trim()}>
+              {discovering ? <RefreshCw className="spin" size={16} /> : <ArrowRight size={16} />}
+              {discovering ? 'Reading' : 'Continue'}
             </button>
           </div>
         </form>
         {error && <div className="connector-error"><CircleAlert size={15} />{error}</div>}
         <div className="connector-hints">
-          <span><strong>Reference</strong> main, branch, version, or tag</span>
+          <span><strong>References</strong> browse branches, versions, and tags next</span>
           <span><strong>Cloud</strong> S3 with server credentials</span>
           <span><strong>Safety</strong> read-only inspection</span>
         </div>
@@ -640,28 +640,27 @@ function DatasetConnector({
   )
 }
 
-function ReferenceSwitcher({
-  dataset,
+function ReferenceBrowser({
+  catalog,
+  overlay,
   onConnected,
-  onCancel,
+  onBack,
 }: {
-  dataset: DatasetInfo
+  catalog: ReferenceCatalog
+  overlay?: boolean
   onConnected: (dataset: DatasetInfo) => void
-  onCancel: () => void
+  onBack: () => void
 }) {
-  const [reference, setReference] = useState(dataset.reference)
   const [error, setError] = useState('')
-  const [connecting, setConnecting] = useState(false)
+  const [connecting, setConnecting] = useState('')
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault()
-    const nextReference = reference.trim() || 'main'
-    setConnecting(true)
+  const select = (reference: string) => {
+    setConnecting(reference)
     setError('')
     fetch('/api/dataset/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uri: dataset.uri, reference: nextReference }),
+      body: JSON.stringify({ uri: catalog.uri, reference }),
     })
       .then(async (response) => {
         const body = await response.json()
@@ -670,41 +669,51 @@ function ReferenceSwitcher({
       })
       .then(onConnected)
       .catch((reason: Error) => setError(reason.message))
-      .finally(() => setConnecting(false))
+      .finally(() => setConnecting(''))
   }
 
   return (
-    <div className="connector-overlay">
-      <section className="connector-card reference-card">
+    <div className={overlay ? 'connector-overlay' : 'connector-screen'}>
+      <section className="connector-card reference-browser">
         <div className="connector-brand"><span className="brand-mark"><GitBranch /></span><strong>Dataset reference</strong></div>
-        <span className="eyebrow">Switch snapshot</span>
-        <h1>Choose a branch, version, or tag</h1>
-        <p className="reference-dataset-uri">{dataset.uri}</p>
-        <form onSubmit={submit}>
-          <div className="connector-control">
-            <label htmlFor="switch-reference">Reference</label>
-            <div className="connector-input">
-              <GitBranch size={17} />
-              <input
-                id="switch-reference"
-                value={reference}
-                onChange={(event) => setReference(event.target.value)}
-                placeholder="main"
-                autoFocus
-                spellCheck={false}
-              />
-            </div>
-          </div>
-          <button className="connector-submit reference-submit" type="submit" disabled={connecting}>
-            {connecting ? <RefreshCw className="spin" size={16} /> : <ArrowRight size={16} />}
-            {connecting ? 'Switching' : 'Switch reference'}
-          </button>
-        </form>
-        <div className="reference-examples">
-          <code>main</code><code>test-branch</code><code>2</code><code>tag:v1</code><code>test-branch:2</code>
+        <span className="eyebrow">{overlay ? 'Switch snapshot' : 'Choose a snapshot'}</span>
+        <h1>Branches and versions</h1>
+        <p className="reference-dataset-uri">{catalog.uri}</p>
+        <div className="reference-list">
+          {catalog.branches.map((branch) => (
+            <section className="branch-history" key={branch.name}>
+              <div className="branch-heading">
+                <span><GitBranch size={14} /><strong>{branch.name}</strong></span>
+                <small>{branch.versions.length} version{branch.versions.length === 1 ? '' : 's'}</small>
+              </div>
+              {branch.parent_version !== null && (
+                <div className="branch-parent">forked from {branch.parent_branch ?? 'main'} at version {branch.parent_version}</div>
+              )}
+              <div className="version-list">
+                {[...branch.versions].reverse().map((version, index) => {
+                  const reference = branch.name === 'main' ? `${version.version}` : `${branch.name}:${version.version}`
+                  return (
+                    <div className="version-option" key={version.version}>
+                      <button onClick={() => select(reference)} disabled={Boolean(connecting)}>
+                        <span className="version-number"><History size={13} />version {version.version}{index === 0 && <em>latest</em>}</span>
+                        <span>{version.total_rows === null ? 'row count unavailable' : `${version.total_rows.toLocaleString()} rows`}</span>
+                        <time>{new Date(version.timestamp).toLocaleString()}</time>
+                        {connecting === reference && <RefreshCw className="spin" size={14} />}
+                      </button>
+                      {version.tags.map((tag) => (
+                        <button className="version-tag" key={tag} onClick={() => select(`tag:${tag}`)} disabled={Boolean(connecting)}>
+                          <Tag size={11} />{tag}
+                        </button>
+                      ))}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          ))}
         </div>
         {error && <div className="connector-error"><CircleAlert size={15} />{error}</div>}
-        <button className="connector-cancel" onClick={onCancel}>Cancel</button>
+        <button className="connector-cancel" onClick={onBack}>{overlay ? 'Cancel' : 'Back to dataset location'}</button>
       </section>
     </div>
   )
@@ -712,6 +721,8 @@ function ReferenceSwitcher({
 
 function App() {
   const [info, setInfo] = useState<DatasetInfo>()
+  const [catalog, setCatalog] = useState<ReferenceCatalog>()
+  const [pendingCatalog, setPendingCatalog] = useState<ReferenceCatalog>()
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
   const [error, setError] = useState('')
@@ -725,6 +736,8 @@ function App() {
       if (!response.ok) throw new Error(`Files API returned ${response.status}`)
       const entries = await response.json() as FileEntry[]
       setInfo(dataset)
+      if (pendingCatalog) setCatalog(pendingCatalog)
+      setPendingCatalog(undefined)
       setFiles(entries)
       setSelection({ type: 'overview' })
       setShowConnector(false)
@@ -735,14 +748,29 @@ function App() {
     }
   }
 
+  const discovered = (nextCatalog: ReferenceCatalog) => {
+    setPendingCatalog(nextCatalog)
+    setShowConnector(false)
+    if (info) setShowReference(true)
+  }
+
   if (error) {
     return <main className="fatal"><CircleAlert /><h1>Unable to inspect dataset</h1><p>{error}</p><button onClick={() => { setError(''); setShowConnector(true) }}>Choose another dataset</button></main>
   }
   if (!info && showConnector) {
-    return <DatasetConnector onConnected={connected} />
+    return <DatasetConnector onDiscovered={discovered} />
+  }
+  if (!info && pendingCatalog) {
+    return (
+      <ReferenceBrowser
+        catalog={pendingCatalog}
+        onConnected={connected}
+        onBack={() => { setPendingCatalog(undefined); setShowConnector(true) }}
+      />
+    )
   }
   if (!info) {
-    return <DatasetConnector onConnected={connected} />
+    return <DatasetConnector onDiscovered={discovered} />
   }
 
   const selectedFile = selection.type === 'file' ? selection.file : undefined
@@ -756,8 +784,9 @@ function App() {
         <div className="dataset-uri"><span className="status-dot" />{info.uri}</div>
         <div className="top-meta">
           <button className="change-dataset" onClick={() => setShowConnector(true)}><HardDrive size={14} />Open dataset</button>
-          <button className="reference-switch" onClick={() => setShowReference(true)} title="Change branch, version, or tag"><GitBranch size={14} />{info.reference}</button>
-          <button className="reference-switch version-switch" onClick={() => setShowReference(true)} title="Checked-out Lance manifest version">version {info.version}</button>
+          <button className="reference-switch" onClick={() => setShowReference(true)} title="Choose a branch, version, or tag">
+            <GitBranch size={14} />{info.branch} · version {info.version}<ChevronDown size={13} />
+          </button>
         </div>
       </header>
       <aside className="sidebar">
@@ -785,8 +814,15 @@ function App() {
         {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} />}
         {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && <RawFileView file={selectedFile} />}
       </main>
-      {showConnector && <DatasetConnector currentUri={info.uri} currentReference={info.reference} onConnected={connected} onCancel={() => setShowConnector(false)} />}
-      {showReference && <ReferenceSwitcher dataset={info} onConnected={connected} onCancel={() => setShowReference(false)} />}
+      {showConnector && <DatasetConnector currentUri={info.uri} onDiscovered={discovered} onCancel={() => setShowConnector(false)} />}
+      {showReference && (pendingCatalog ?? catalog) && (
+        <ReferenceBrowser
+          catalog={(pendingCatalog ?? catalog)!}
+          overlay
+          onConnected={connected}
+          onBack={() => { setPendingCatalog(undefined); setShowReference(false) }}
+        />
+      )}
     </div>
   )
 }
