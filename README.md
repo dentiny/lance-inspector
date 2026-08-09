@@ -112,7 +112,7 @@ available, and associated tags. Solid edges connect versions on the same branch;
 curved fork edges connect a child branch to its exact parent-version node. This
 makes branch ancestry visible without inspecting the `_refs` files manually.
 
-![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage.png)
+![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage-graph.png)
 
 Select any version or tag to open that immutable dataset snapshot. The file
 hierarchy, manifest, fragments, rows, transactions, deletion vectors, and media
