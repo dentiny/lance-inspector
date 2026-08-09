@@ -102,6 +102,10 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .change-dataset, .reference-switch { background: transparent; border: 0; cursor: pointer; }
 .change-dataset:hover, .reference-switch:hover { color: var(--green); background: var(--green-dim); }
 .version-switch { color: var(--faint); }
+.mode-switch { height: 100%; display: flex; align-items: center; gap: 3px; padding: 0 8px; border-left: 1px solid var(--line); }
+.mode-switch button { height: 32px; display: flex; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid transparent; border-radius: 5px; color: var(--faint); background: transparent; cursor: pointer; font: 9px var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+.mode-switch button:hover { color: var(--text); background: var(--surface-2); }
+.mode-switch button.active { border-color: rgba(117, 211, 166, .24); color: var(--green); background: var(--green-dim); }
 
 .sidebar {
   grid-row: 2;
@@ -175,8 +179,11 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 }
 
 .content { min-width: 0; grid-row: 2; }
+.app-shell.user-mode { grid-template-columns: minmax(0, 1fr); }
+.user-mode .content { grid-column: 1; }
 .page { width: min(1120px, calc(100% - 64px)); margin: 0 auto; padding: 42px 0 80px; }
 .wide-page { width: calc(100% - 48px); }
+.user-data-page { max-width: 1600px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; gap: 30px; }
 .page-heading h1 { margin: 6px 0 8px; font-size: 27px; line-height: 1.2; letter-spacing: -.03em; color: #f0f4fa; font-weight: 620; }
 .page-heading p { color: var(--muted); font-size: 13px; margin: 0; font-family: var(--mono); word-break: break-all; }

@@ -389,11 +389,10 @@ function MediaValue({
   return <a className="blob-link" href={source} target="_blank">open blob</a>
 }
 
-function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
+function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; title?: string }) {
   const [data, setData] = useState<RowsResponse>()
   const [offset, setOffset] = useState(0)
   const [error, setError] = useState('')
-  const fragment = info.fragments.find((item) => item.files.some((candidate) => candidate.path === file.path))
   useEffect(() => {
     setData(undefined)
     setError('')
@@ -404,8 +403,49 @@ function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
       })
       .then(setData)
       .catch((reason: Error) => setError(reason.message))
-  }, [offset, file.path])
+  }, [offset, refreshKey])
 
+  return (
+    <section className="panel data-panel">
+      <div className="panel-title">
+        <div><span className="eyebrow">Live dataset scan</span><h2>{title}</h2></div>
+        {data && <span className="count-badge">{offset + 1}–{Math.min(offset + data.rows.length, data.total)} of {data.total}</span>}
+      </div>
+      {error && <div className="error-state"><CircleAlert />{error}</div>}
+      {!data && !error && <div className="loading-state"><RefreshCw className="spin" />Scanning Lance rows…</div>}
+      {data && (
+        <>
+          <div className="table-scroll">
+            <table>
+              <thead><tr>
+                {data.columns.filter((column) => column !== '_rowaddr').map((column) => <th key={column}>{column}</th>)}
+                {data.media_columns.map((column) => <th key={column.name}>{column.name}</th>)}
+              </tr></thead>
+              <tbody>
+                {data.rows.map((row, index) => (
+                  <tr key={String(row._rowaddr ?? index)}>
+                    {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
+                      <td key={column}><ScalarValue value={row[column]} /></td>
+                    ))}
+                    {data.media_columns.map((column) => <td key={column.name}><MediaValue column={column} row={row} /></td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="pagination">
+            <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button>
+            <span>20 rows per page</span>
+            <button disabled={offset + 20 >= data.total} onClick={() => setOffset(offset + 20)}>Next</button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
+  const fragment = info.fragments.find((item) => item.files.some((candidate) => candidate.path === file.path))
   return (
     <div className="page wide-page">
       <div className="page-heading">
@@ -413,41 +453,27 @@ function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
         <span className="count-badge">{formatBytes(file.size)}</span>
       </div>
       {fragment?.deletion && <DeletionGrid fragment={fragment} />}
-      <section className="panel data-panel">
-        <div className="panel-title">
-          <div><span className="eyebrow">Live dataset scan</span><h2>Row preview</h2></div>
-          {data && <span className="count-badge">{offset + 1}–{Math.min(offset + data.rows.length, data.total)} of {data.total}</span>}
+      <RowsPanel key={file.path} refreshKey={file.path} />
+    </div>
+  )
+}
+
+function UserDataView({ info }: { info: DatasetInfo }) {
+  return (
+    <div className="page wide-page user-data-page">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">User mode · selected snapshot</span>
+          <h1>Dataset data</h1>
+          <p>{info.uri}</p>
         </div>
-        {error && <div className="error-state"><CircleAlert />{error}</div>}
-        {!data && !error && <div className="loading-state"><RefreshCw className="spin" />Scanning Lance rows…</div>}
-        {data && (
-          <>
-            <div className="table-scroll">
-              <table>
-                <thead><tr>
-                  {data.columns.filter((column) => column !== '_rowaddr').map((column) => <th key={column}>{column}</th>)}
-                  {data.media_columns.map((column) => <th key={column.name}>{column.name}</th>)}
-                </tr></thead>
-                <tbody>
-                  {data.rows.map((row, index) => (
-                    <tr key={String(row._rowaddr ?? index)}>
-                      {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
-                        <td key={column}><ScalarValue value={row[column]} /></td>
-                      ))}
-                      {data.media_columns.map((column) => <td key={column.name}><MediaValue column={column} row={row} /></td>)}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="pagination">
-              <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button>
-              <span>20 rows per page</span>
-              <button disabled={offset + 20 >= data.total} onClick={() => setOffset(offset + 20)}>Next</button>
-            </div>
-          </>
-        )}
-      </section>
+        <span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>
+      </div>
+      <RowsPanel
+        key={`${info.uri}:${info.branch}:${info.version}`}
+        refreshKey={`${info.uri}:${info.branch}:${info.version}`}
+        title="Dataset rows"
+      />
     </div>
   )
 }
@@ -828,6 +854,7 @@ function App() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
   const [error, setError] = useState('')
+  const [mode, setMode] = useState<'infra' | 'user'>('infra')
   const [showConnector, setShowConnector] = useState(true)
   const [showReference, setShowReference] = useState(false)
   const tree = useMemo(() => buildTree(files), [files])
@@ -877,7 +904,7 @@ function App() {
 
   const selectedFile = selection.type === 'file' ? selection.file : undefined
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${mode === 'user' ? 'user-mode' : ''}`}>
       <header className="topbar">
         <button className="brand" onClick={() => setSelection({ type: 'overview' })}>
           <span className="brand-mark"><Database size={18} /></span>
@@ -889,32 +916,48 @@ function App() {
           <button className="reference-switch" onClick={() => setShowReference(true)} title="Choose a branch, version, or tag">
             <GitBranch size={14} />{info.branch} · version {info.version}<ChevronDown size={13} />
           </button>
+          <div className="mode-switch" role="group" aria-label="Inspector mode">
+            <button className={mode === 'infra' ? 'active' : ''} onClick={() => setMode('infra')} title="Show storage internals">
+              <Braces size={13} />Infra
+            </button>
+            <button className={mode === 'user' ? 'active' : ''} onClick={() => setMode('user')} title="Show dataset rows only">
+              <Rows3 size={13} />User
+            </button>
+          </div>
         </div>
       </header>
-      <aside className="sidebar">
-        <button className={`dataset-root ${selection.type === 'overview' ? 'selected' : ''}`} onClick={() => setSelection({ type: 'overview' })}>
-          <Database size={16} /><span>Dataset root</span><small>{info.rows} rows</small>
-        </button>
-        <div className="sidebar-label">Storage files <span>{files.length}</span></div>
-        <nav className="file-tree">
-          {tree.map((node) => (
-            <TreeItem
-              key={node.path}
-              node={node}
-              selected={selectedFile?.path}
-              onSelect={(file) => setSelection({ type: 'file', file })}
-            />
-          ))}
-        </nav>
-        <div className="sidebar-footer"><Braces size={14} /><span>Lance format inspector</span></div>
-      </aside>
+      {mode === 'infra' && (
+        <aside className="sidebar">
+          <button className={`dataset-root ${selection.type === 'overview' ? 'selected' : ''}`} onClick={() => setSelection({ type: 'overview' })}>
+            <Database size={16} /><span>Dataset root</span><small>{info.rows} rows</small>
+          </button>
+          <div className="sidebar-label">Storage files <span>{files.length}</span></div>
+          <nav className="file-tree">
+            {tree.map((node) => (
+              <TreeItem
+                key={node.path}
+                node={node}
+                selected={selectedFile?.path}
+                onSelect={(file) => setSelection({ type: 'file', file })}
+              />
+            ))}
+          </nav>
+          <div className="sidebar-footer"><Braces size={14} /><span>Lance format inspector</span></div>
+        </aside>
+      )}
       <main className="content">
-        {selection.type === 'overview' && <Overview info={info} />}
-        {selectedFile?.kind === 'manifest' && <ManifestView info={info} file={selectedFile} />}
-        {selectedFile?.kind === 'data' && <DataView info={info} file={selectedFile} />}
-        {selectedFile?.kind === 'deletion' && <DeletionFileView info={info} file={selectedFile} />}
-        {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} />}
-        {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && <RawFileView file={selectedFile} />}
+        {mode === 'user' ? (
+          <UserDataView info={info} />
+        ) : (
+          <>
+            {selection.type === 'overview' && <Overview info={info} />}
+            {selectedFile?.kind === 'manifest' && <ManifestView info={info} file={selectedFile} />}
+            {selectedFile?.kind === 'data' && <DataView info={info} file={selectedFile} />}
+            {selectedFile?.kind === 'deletion' && <DeletionFileView info={info} file={selectedFile} />}
+            {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} />}
+            {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && <RawFileView file={selectedFile} />}
+          </>
+        )}
       </main>
       {showConnector && <DatasetConnector currentUri={info.uri} onDiscovered={discovered} onCancel={() => setShowConnector(false)} />}
       {showReference && (pendingCatalog ?? catalog) && (
