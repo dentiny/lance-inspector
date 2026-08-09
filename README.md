@@ -8,7 +8,7 @@ and the underlying object hierarchy.
 It runs locally, in Docker, or on Kubernetes against a mounted dataset or an S3
 URI. No database or catalog service is required.
 
-![Dataset overview showing schema and physical storage](docs/images/dataset-overview.png)
+![Dataset overview in Infra mode showing schema and physical storage](docs/images/dataset-overview-infra.png)
 
 ## Who it is for
 
@@ -44,15 +44,17 @@ dashboard or dataset editor.
   nodes, commit edges, fork edges, timestamps, row counts, and tags.
 - Opens any discovered branch version or tag directly and switches snapshots
   from the loaded-dataset header.
+- Provides an **Infra** mode for storage internals and a data-only **User** mode
+  for viewing the rows and multimodal values in the selected snapshot.
 - Exposes no mutation endpoints and is designed to run with read-only storage.
 
 ### Multimodal row inspection
 
-![Rows with image, audio, and video previews](docs/images/multimodal-preview.png)
+![Rows with image, audio, and video previews in Infra mode](docs/images/multimodal-preview-infra.png)
 
 ### Human-readable transaction history
 
-![Decoded protobuf transaction operation](docs/images/transaction-inspector.png)
+![Decoded protobuf transaction operation in Infra mode](docs/images/transaction-inspector-infra.png)
 
 ## Current scope
 
@@ -102,7 +104,7 @@ can choose a snapshot without knowing its reference name in advance.
 The landing page asks only for a dataset location. Reference selection happens
 after Lance has discovered the dataset's actual branch and version metadata.
 
-![Dataset location input in the web UI](docs/images/dataset-connection.png)
+![Dataset location input in the web UI](docs/images/dataset-connection-current.png)
 
 ### 2. Choose a snapshot from the lineage graph
 
@@ -112,7 +114,7 @@ available, and associated tags. Solid edges connect versions on the same branch;
 curved fork edges connect a child branch to its exact parent-version node. This
 makes branch ancestry visible without inspecting the `_refs` files manually.
 
-![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage-graph.png)
+![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage-graph-current.png)
 
 Select any version or tag to open that immutable dataset snapshot. The file
 hierarchy, manifest, fragments, rows, transactions, deletion vectors, and media
@@ -124,6 +126,20 @@ After a dataset loads, the header shows the checked-out branch and resolved
 manifest version, for example **main · version 2**. Select it to reopen the same
 lineage graph in an overlay and switch snapshots without entering the dataset
 location again or restarting the server.
+
+### 4. Switch interface modes
+
+The top-right mode control defaults to **Infra**:
+
+- **Infra** shows the complete storage inspector: hierarchy, manifests,
+  fragments, transactions, deletion vectors, raw files, and row previews.
+- **User** removes the storage hierarchy and internal metadata views. It shows
+  only the live rows and multimodal values from the exact branch and version
+  selected in the header.
+
+Switching modes does not change the selected dataset snapshot.
+
+![Data-only User mode with multimodal row values](docs/images/user-mode.png)
 
 The same workflow is available through Make:
 
