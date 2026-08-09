@@ -40,8 +40,8 @@ dashboard or dataset editor.
   with native browser controls.
 - Supports HTTP byte ranges for efficient media streaming.
 - Uses the same Lance object-store integration for local paths and S3.
-- Discovers snapshot lineage before opening a dataset: branches, version
-  histories, fork points, timestamps, row counts, and tags.
+- Renders snapshot lineage as an interactive graph with branch lanes, version
+  nodes, commit edges, fork edges, timestamps, row counts, and tags.
 - Opens any discovered branch version or tag directly and switches snapshots
   from the loaded-dataset header.
 - Exposes no mutation endpoints and is designed to run with read-only storage.
@@ -92,29 +92,38 @@ cargo run --manifest-path backend/Cargo.toml
 
 Open [http://localhost:8080](http://localhost:8080), enter a local path such as
 `/tmp/hjiang_test_lance` or an S3 URI, and select **Continue**. The inspector
-then lists the dataset's branches, versions, and tags so you can choose a
-snapshot without knowing its reference name in advance.
+then visualizes the dataset's branches, versions, fork points, and tags so you
+can choose a snapshot without knowing its reference name in advance.
+
+## Web workflow
+
+### 1. Open a dataset
+
+The landing page asks only for a dataset location. Reference selection happens
+after Lance has discovered the dataset's actual branch and version metadata.
 
 ![Dataset location input in the web UI](docs/images/dataset-connection.png)
 
-## Browse snapshot lineage
+### 2. Choose a snapshot from the lineage graph
 
 After reading the dataset location, the landing flow displays each branch and
 its manifest-version history. Every version shows its timestamp, row count when
-available, and associated tags. A branch also identifies the parent branch and
-version from which it forked, making branch ancestry visible without inspecting
-the `_refs` files manually.
+available, and associated tags. Solid edges connect versions on the same branch;
+curved fork edges connect a child branch to its exact parent-version node. This
+makes branch ancestry visible without inspecting the `_refs` files manually.
 
-![Snapshot lineage browser showing branches and versions](docs/images/snapshot-lineage.png)
+![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage.png)
 
 Select any version or tag to open that immutable dataset snapshot. The file
 hierarchy, manifest, fragments, rows, transactions, deletion vectors, and media
 previews then reflect that selected snapshot.
 
+### 3. Inspect and switch snapshots
+
 After a dataset loads, the header shows the checked-out branch and resolved
-manifest version, for example **main · version 2**. Select it to open the same
-lineage browser as a dropdown overlay and switch snapshots without entering the
-dataset location again or restarting the server.
+manifest version, for example **main · version 2**. Select it to reopen the same
+lineage graph in an overlay and switch snapshots without entering the dataset
+location again or restarting the server.
 
 The same workflow is available through Make:
 
@@ -155,8 +164,8 @@ normal AWS credential or workload-identity configuration.
 ## Kubernetes
 
 [`deploy/kubernetes.yaml`](deploy/kubernetes.yaml) contains a Deployment and
-Service example. Replace the image, dataset URI, and sample `hostPath` with a
-PVC/CSI mount or an S3 URI before applying it.
+Service example. Replace the image and sample `hostPath` with a PVC/CSI mount,
+or enter an S3 URI from the web UI after deployment.
 
 ```bash
 kubectl apply -f deploy/kubernetes.yaml
