@@ -15,19 +15,17 @@ use uuid::Uuid;
 
 use crate::models::{FileEntry, FilePreview, FilesPage, TransactionView};
 
-use super::{ApiError, AppState, ConnectedDataset, InvalidRequest, connected, connected_session};
+use super::{
+    error::{ApiError, InvalidRequest},
+    state::{AppState, ConnectedDataset, FileListing, connected, connected_session},
+};
 
+// Maximum number of bytes returned by the raw-file preview endpoint.
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
+// Number of file entries returned when the client omits a page size.
 const DEFAULT_FILES_PAGE_SIZE: usize = 500;
+// Upper bound for one file-listing page requested by a client.
 const MAX_FILES_PAGE_SIZE: usize = 1_000;
-
-pub(super) struct FileListing {
-    receiver: mpsc::Receiver<Result<FileEntry, String>>,
-    pending: Option<FileEntry>,
-    next_offset: usize,
-    last_offset: Option<usize>,
-    last_page: Option<FilesPage>,
-}
 
 pub(crate) async fn files(
     State(state): State<Arc<AppState>>,

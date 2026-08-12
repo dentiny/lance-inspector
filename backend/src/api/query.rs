@@ -1,8 +1,4 @@
-use std::{
-    collections::VecDeque,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 use anyhow::{Result, anyhow};
 use arrow_array::RecordBatch;
@@ -13,48 +9,34 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use datafusion_execution::SendableRecordBatchStream;
 use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::models::{MediaColumn, RowsResponse, SqlCursorResponse, SqlPageResponse};
+use crate::models::{RowsResponse, SqlCursorResponse, SqlPageResponse};
 
 use super::{
-    ApiError, AppState, ConnectedDataset, ConnectionQuery, InvalidRequest, QueryExecutionFailed,
-    UnknownQueryCursor, connected, is_blob_field,
+    error::{ApiError, InvalidRequest, QueryExecutionFailed, UnknownQueryCursor},
+    schema::{dataset_columns, sql_result_columns},
+    state::{AppState, ConnectedDataset, ConnectionQuery, QUERY_IDLE_TTL, QueryCursor, connected},
 };
 
+// Maximum number of rows accepted by the direct row-preview endpoint.
 const MAX_ROWS: usize = 100;
+// Number of rows returned when a row-preview request omits its limit.
+const DEFAULT_ROW_LIMIT: usize = 20;
+// Number of rows pulled from a SQL cursor per page.
 const SQL_PAGE_ROWS: usize = 100;
+// Hard cap on rows retained and returned by one SQL query.
 const MAX_SQL_RESULT_ROWS: usize = 10_000;
-const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
-
-pub(super) struct QueryCursor {
-    connection_id: Uuid,
-    stream: SendableRecordBatchStream,
-    scalar_indices: Vec<usize>,
-    pending_rows: VecDeque<Value>,
-    next_sequence: u64,
-    rows_returned: usize,
-    last_page: Option<SqlPageResponse>,
-    last_accessed: Instant,
-    done: bool,
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct RowsQuery {
     connection_id: Uuid,
     #[serde(default)]
     offset: usize,
-    #[serde(default = "default_row_limit")]
-    limit: usize,
-}
-
-fn default_row_limit() -> usize {
-    20
+    limit: Option<usize>,
 }
 
 pub(crate) async fn rows(
@@ -69,32 +51,12 @@ pub(crate) async fn rows(
 }
 
 async fn read_rows(connection: &ConnectedDataset, query: RowsQuery) -> Result<RowsResponse> {
-    let limit = query.limit.clamp(1, MAX_ROWS);
+    let limit = query.limit.unwrap_or(DEFAULT_ROW_LIMIT).clamp(1, MAX_ROWS);
     let arrow_schema = ArrowSchema::from(&connection.dataset.manifest().schema);
-    let media_columns: Vec<_> = arrow_schema
-        .fields()
-        .iter()
-        .filter(|field| is_blob_field(field))
-        .map(|field| {
-            let mime_name = format!("{}_mime", field.name());
-            MediaColumn {
-                name: field.name().clone(),
-                mime_column: arrow_schema
-                    .field_with_name(&mime_name)
-                    .ok()
-                    .map(|_| mime_name),
-            }
-        })
-        .collect();
-    let scalar_columns: Vec<String> = arrow_schema
-        .fields()
-        .iter()
-        .filter(|field| !is_blob_field(field))
-        .map(|field| field.name().clone())
-        .collect();
+    let columns = dataset_columns(&arrow_schema);
 
     let mut scanner = connection.dataset.scan();
-    scanner.project(&scalar_columns)?;
+    scanner.project(&columns.scalar)?;
     scanner.with_row_address();
     scanner.limit(Some(limit as i64), Some(query.offset as i64))?;
     let batches = scanner
@@ -117,8 +79,8 @@ async fn read_rows(connection: &ConnectedDataset, query: RowsQuery) -> Result<Ro
         offset: query.offset,
         limit,
         total: connection.dataset.count_rows(None).await?,
-        columns: scalar_columns,
-        media_columns,
+        columns: columns.scalar,
+        media_columns: columns.media,
         rows,
     })
 }
@@ -163,38 +125,14 @@ async fn create_sql_cursor(
     let record_stream = query.into_stream().await?;
     let result_schema = record_stream.schema();
     let dataset_schema = ArrowSchema::from(&connection.dataset.manifest().schema);
-    let scalar_indices: Vec<_> = result_schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, field)| (!is_sql_blob_field(field, &dataset_schema)).then_some(index))
-        .collect();
-    let columns: Vec<_> = scalar_indices
-        .iter()
-        .map(|index| result_schema.field(*index).name().clone())
-        .collect();
-    let media_columns: Vec<_> = result_schema
-        .fields()
-        .iter()
-        .filter(|field| is_sql_blob_field(field, &dataset_schema))
-        .map(|field| {
-            let mime_name = format!("{}_mime", field.name());
-            MediaColumn {
-                name: field.name().clone(),
-                mime_column: result_schema
-                    .field_with_name(&mime_name)
-                    .ok()
-                    .map(|_| mime_name),
-            }
-        })
-        .collect();
+    let columns = sql_result_columns(&result_schema, &dataset_schema);
     let cursor_id = Uuid::new_v4();
     state.queries.insert(
         cursor_id,
         Arc::new(AsyncMutex::new(QueryCursor {
             connection_id,
             stream: record_stream,
-            scalar_indices,
+            scalar_indices: columns.scalar_indices,
             pending_rows: VecDeque::new(),
             next_sequence: 0,
             rows_returned: 0,
@@ -205,8 +143,8 @@ async fn create_sql_cursor(
     );
     Ok(SqlCursorResponse {
         cursor_id,
-        columns,
-        media_columns,
+        columns: columns.scalar,
+        media_columns: columns.media,
     })
 }
 
@@ -361,13 +299,6 @@ fn serialize_rows(batch: &RecordBatch) -> Result<Vec<Value>> {
     Ok(serde_json::from_slice(&output)?)
 }
 
-fn is_sql_blob_field(field: &arrow_schema::Field, dataset_schema: &ArrowSchema) -> bool {
-    is_blob_field(field)
-        || dataset_schema
-            .field_with_name(field.name())
-            .is_ok_and(is_blob_field)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,7 +306,7 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use lance::Dataset;
 
-    use crate::api::SessionEntry;
+    use crate::api::state::SessionEntry;
 
     #[test]
     fn accepts_only_read_only_sql() {

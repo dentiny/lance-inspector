@@ -16,9 +16,12 @@ use crate::models::{
 };
 
 use super::{
-    ApiError, AppState, ConnectedDataset, ConnectionQuery, SessionEntry, connected, is_blob_field,
+    error::ApiError,
+    schema::is_blob_field,
+    state::{AppState, ConnectedDataset, ConnectionQuery, SessionEntry, connected},
 };
 
+// Maximum number of deleted row offsets included in the UI preview.
 const MAX_DELETION_OFFSETS: usize = 2_000;
 
 pub(crate) async fn dataset_info(

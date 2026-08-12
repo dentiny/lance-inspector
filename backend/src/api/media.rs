@@ -13,7 +13,11 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::{ApiError, AppState, ConnectedDataset, RangeNotSatisfiable, connected, is_blob_field};
+use super::{
+    error::{ApiError, RangeNotSatisfiable},
+    schema::is_blob_field,
+    state::{AppState, ConnectedDataset, connected},
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MediaQuery {
