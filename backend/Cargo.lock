@@ -4240,7 +4240,6 @@ dependencies = [
  "arrow-json",
  "arrow-schema",
  "axum",
- "bytes",
  "clap",
  "datafusion-execution",
  "foyer",
