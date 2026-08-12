@@ -24,6 +24,12 @@ pub(super) struct InvalidRequest(pub(super) String);
 pub(super) struct QueryExecutionFailed(pub(super) String);
 
 #[derive(Debug)]
+pub(super) struct BlobUnavailable {
+    pub(super) column: String,
+    pub(super) row_address: u64,
+}
+
+#[derive(Debug)]
 pub(super) struct RangeNotSatisfiable {
     pub(super) size: u64,
     pub(super) message: String,
@@ -73,6 +79,18 @@ impl std::fmt::Display for QueryExecutionFailed {
 
 impl std::error::Error for QueryExecutionFailed {}
 
+impl std::fmt::Display for BlobUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "blob column '{}' is null or unavailable at row address {}",
+            self.column, self.row_address
+        )
+    }
+}
+
+impl std::error::Error for BlobUnavailable {}
+
 impl std::fmt::Display for RangeNotSatisfiable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -100,7 +118,9 @@ impl IntoResponse for ApiError {
         }
         let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
             StatusCode::GONE
-        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
+        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some()
+            || self.0.downcast_ref::<BlobUnavailable>().is_some()
+        {
             StatusCode::NOT_FOUND
         } else if self.0.downcast_ref::<QueryExecutionFailed>().is_some() {
             StatusCode::UNPROCESSABLE_ENTITY

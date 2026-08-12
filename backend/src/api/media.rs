@@ -14,7 +14,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{
-    error::{ApiError, RangeNotSatisfiable},
+    error::{ApiError, BlobUnavailable, RangeNotSatisfiable},
     schema::is_blob_field,
     state::{AppState, ConnectedDataset, connected},
 };
@@ -56,7 +56,10 @@ async fn read_media(
         .dataset
         .take_blobs_by_addresses(&[row_address], column)
         .await?;
-    let blob = blobs.pop().ok_or_else(|| anyhow!("blob row not found"))?;
+    let blob = blobs.pop().flatten().ok_or_else(|| BlobUnavailable {
+        column: column.to_string(),
+        row_address,
+    })?;
     let size = blob.size();
     let (start, end, partial) = parse_range(headers.get(RANGE), size)?;
     let bytes = blob.read_range(start..end).await?;
@@ -166,5 +169,17 @@ mod tests {
             assert_eq!(response.headers()[CONTENT_RANGE], "bytes */100");
             assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
         }
+    }
+
+    #[test]
+    fn reports_null_or_missing_blobs_as_not_found() {
+        let error = anyhow!(BlobUnavailable {
+            column: "image".to_string(),
+            row_address: 42,
+        });
+        assert_eq!(
+            ApiError(error).into_response().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }
