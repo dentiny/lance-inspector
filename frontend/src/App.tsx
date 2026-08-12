@@ -69,6 +69,11 @@ type DatasetInfo = {
   branches: { name: string; parent_branch: string | null; parent_version: number }[]
 }
 
+type ConnectedDataset = {
+  connection_id: string
+  dataset: DatasetInfo
+}
+
 type ReferenceCatalog = {
   uri: string
   branches: {
@@ -125,6 +130,20 @@ type TransactionInfo = {
 }
 
 type Selection = { type: 'overview' } | { type: 'sql' } | { type: 'file'; file: FileEntry }
+
+const connectedUrl = (path: string, connectionId: string) => {
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}connection_id=${encodeURIComponent(connectionId)}`
+}
+
+async function requireOk(response: Response) {
+  if (response.ok) return response
+  const body = await response.json().catch(() => ({ error: response.statusText }))
+  if (response.status === 410) {
+    window.dispatchEvent(new Event('lance-connection-expired'))
+  }
+  throw new Error(body.error ?? response.statusText)
+}
 
 const formatBytes = (bytes: number | null) => {
   if (bytes == null) return 'unknown'
@@ -381,9 +400,11 @@ function ManifestView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
 function MediaValue({
   column,
   row,
+  connectionId,
 }: {
   column: RowsResponse['media_columns'][number]
   row: Record<string, unknown>
+  connectionId: string
 }) {
   const container = useRef<HTMLDivElement>(null)
   const [nearViewport, setNearViewport] = useState(false)
@@ -423,7 +444,10 @@ function MediaValue({
   }, [nearViewport])
 
   if (rowAddress == null) return <span>—</span>
-  const source = `/api/media/${encodeURIComponent(column.name)}/${rowAddress}?mime=${encodeURIComponent(mime)}`
+  const source = connectedUrl(
+    `/api/media/${encodeURIComponent(column.name)}/${rowAddress}?mime=${encodeURIComponent(mime)}`,
+    connectionId,
+  )
   let content
   if (!nearViewport) {
     content = <span className="media-lazy-label">Blob</span>
@@ -447,7 +471,7 @@ function MediaValue({
   )
 }
 
-function RowsTable({ data }: { data: TableData }) {
+function RowsTable({ data, connectionId }: { data: TableData; connectionId: string }) {
   return (
     <div className="table-scroll">
       <table>
@@ -461,7 +485,9 @@ function RowsTable({ data }: { data: TableData }) {
               {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
                 <td key={column}><ScalarValue value={row[column]} /></td>
               ))}
-              {data.media_columns.map((column) => <td key={column.name}><MediaValue column={column} row={row} /></td>)}
+              {data.media_columns.map((column) => (
+                <td key={column.name}><MediaValue column={column} row={row} connectionId={connectionId} /></td>
+              ))}
             </tr>
           ))}
         </tbody>
@@ -470,21 +496,29 @@ function RowsTable({ data }: { data: TableData }) {
   )
 }
 
-function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; title?: string }) {
+function RowsPanel({
+  refreshKey,
+  connectionId,
+  title = 'Row preview',
+}: {
+  refreshKey: string
+  connectionId: string
+  title?: string
+}) {
   const [data, setData] = useState<RowsResponse>()
   const [offset, setOffset] = useState(0)
   const [error, setError] = useState('')
   useEffect(() => {
     setData(undefined)
     setError('')
-    fetch(`/api/rows?offset=${offset}&limit=20`)
+    fetch(connectedUrl(`/api/rows?offset=${offset}&limit=20`, connectionId))
       .then(async (response) => {
-        if (!response.ok) throw new Error((await response.json()).error ?? response.statusText)
+        await requireOk(response)
         return response.json() as Promise<RowsResponse>
       })
       .then(setData)
       .catch((reason: Error) => setError(reason.message))
-  }, [offset, refreshKey])
+  }, [connectionId, offset, refreshKey])
 
   return (
     <section className="panel data-panel">
@@ -496,7 +530,7 @@ function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; 
       {!data && !error && <div className="loading-state"><RefreshCw className="spin" />Scanning Lance rows…</div>}
       {data && (
         <>
-          <RowsTable data={data} />
+          <RowsTable data={data} connectionId={connectionId} />
           <div className="pagination">
             <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button>
             <span>20 rows per page</span>
@@ -508,7 +542,7 @@ function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; 
   )
 }
 
-function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
+function DataView({ info, file, connectionId }: { info: DatasetInfo; file: FileEntry; connectionId: string }) {
   const fragment = info.fragments.find((item) => item.files.some((candidate) => candidate.path === file.path))
   return (
     <div className="page wide-page">
@@ -517,7 +551,7 @@ function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
         <span className="count-badge">{formatBytes(file.size)}</span>
       </div>
       {fragment?.deletion && <DeletionGrid fragment={fragment} />}
-      <RowsPanel key={file.path} refreshKey={file.path} />
+      <RowsPanel key={file.path} refreshKey={file.path} connectionId={connectionId} />
     </div>
   )
 }
@@ -526,19 +560,17 @@ const DEFAULT_SQL = 'SELECT * FROM dataset'
 
 async function consumeSqlStream(
   sql: string,
+  connectionId: string,
   signal: AbortSignal,
   onEvent: (event: SqlStreamEvent) => void,
 ) {
-  const response = await fetch('/api/sql', {
+  const response = await fetch(connectedUrl('/api/sql', connectionId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sql }),
     signal,
   })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: response.statusText }))
-    throw new Error(body.error ?? response.statusText)
-  }
+  await requireOk(response)
   if (!response.body) throw new Error('SQL response does not support streaming')
 
   const reader = response.body.getReader()
@@ -563,7 +595,7 @@ async function consumeSqlStream(
   consumeLines(true)
 }
 
-function SqlQueryView({ snapshotKey }: { snapshotKey: string }) {
+function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; connectionId: string }) {
   const [sql, setSql] = useState(DEFAULT_SQL)
   const [data, setData] = useState<TableData>()
   const [error, setError] = useState('')
@@ -578,7 +610,7 @@ function SqlQueryView({ snapshotKey }: { snapshotKey: string }) {
     setError('')
     setStreaming(true)
     try {
-      await consumeSqlStream(statement, controller.signal, (event) => {
+      await consumeSqlStream(statement, connectionId, controller.signal, (event) => {
         if (event.type === 'schema') {
           setData({ columns: event.columns, media_columns: event.media_columns, rows: [] })
         } else if (event.type === 'rows') {
@@ -594,7 +626,7 @@ function SqlQueryView({ snapshotKey }: { snapshotKey: string }) {
     } finally {
       if (request.current === controller) setStreaming(false)
     }
-  }, [])
+  }, [connectionId])
 
   useEffect(() => {
     void execute(DEFAULT_SQL)
@@ -644,14 +676,22 @@ function SqlQueryView({ snapshotKey }: { snapshotKey: string }) {
         {error && <div className="error-state"><CircleAlert />{error}</div>}
         {!data && streaming && <div className="loading-state"><RefreshCw className="spin" />Planning SQL query…</div>}
         {data && data.rows.length === 0 && streaming && <div className="loading-state"><RefreshCw className="spin" />Waiting for rows…</div>}
-        {data && data.rows.length > 0 && <RowsTable data={data} />}
+        {data && data.rows.length > 0 && <RowsTable data={data} connectionId={connectionId} />}
         {data && data.rows.length === 0 && !streaming && <div className="empty-state">Query returned no rows.</div>}
       </section>
     </>
   )
 }
 
-function DatasetQueryView({ info, mode }: { info: DatasetInfo; mode: 'infra' | 'user' }) {
+function DatasetQueryView({
+  info,
+  mode,
+  connectionId,
+}: {
+  info: DatasetInfo
+  mode: 'infra' | 'user'
+  connectionId: string
+}) {
   return (
     <div className="page wide-page user-data-page">
       <div className="page-heading">
@@ -665,6 +705,7 @@ function DatasetQueryView({ info, mode }: { info: DatasetInfo; mode: 'infra' | '
       <SqlQueryView
         key={`${info.uri}:${info.branch}:${info.version}`}
         snapshotKey={`${info.uri}:${info.branch}:${info.version}`}
+        connectionId={connectionId}
       />
     </div>
   )
@@ -689,20 +730,20 @@ function DeletionFileView({ info, file }: { info: DatasetInfo; file: FileEntry }
   )
 }
 
-function TransactionFileView({ file }: { file: FileEntry }) {
+function TransactionFileView({ file, connectionId }: { file: FileEntry; connectionId: string }) {
   const [transaction, setTransaction] = useState<TransactionInfo>()
   const [error, setError] = useState('')
   useEffect(() => {
     setTransaction(undefined)
     setError('')
-    fetch(`/api/transaction?path=${encodeURIComponent(file.path)}`)
+    fetch(connectedUrl(`/api/transaction?path=${encodeURIComponent(file.path)}`, connectionId))
       .then(async (response) => {
-        if (!response.ok) throw new Error((await response.json()).error ?? response.statusText)
+        await requireOk(response)
         return response.json() as Promise<TransactionInfo>
       })
       .then(setTransaction)
       .catch((reason: Error) => setError(reason.message))
-  }, [file.path])
+  }, [connectionId, file.path])
 
   return (
     <div className="page">
@@ -753,18 +794,18 @@ function TransactionFileView({ file }: { file: FileEntry }) {
   )
 }
 
-function RawFileView({ file }: { file: FileEntry }) {
+function RawFileView({ file, connectionId }: { file: FileEntry; connectionId: string }) {
   const [preview, setPreview] = useState<{ content: string; format: string; truncated: boolean }>()
   const [error, setError] = useState('')
   useEffect(() => {
-    fetch(`/api/file?path=${encodeURIComponent(file.path)}`)
+    fetch(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId))
       .then(async (response) => {
-        if (!response.ok) throw new Error((await response.json()).error ?? response.statusText)
+        await requireOk(response)
         return response.json()
       })
       .then(setPreview)
       .catch((reason: Error) => setError(reason.message))
-  }, [file.path])
+  }, [connectionId, file.path])
   return (
     <div className="page">
       <div className="page-heading">
@@ -1000,7 +1041,7 @@ function ReferenceBrowser({
 }: {
   catalog: ReferenceCatalog
   overlay?: boolean
-  onConnected: (dataset: DatasetInfo) => void
+  onConnected: (dataset: ConnectedDataset) => void
   onBack: () => void
 }) {
   const [error, setError] = useState('')
@@ -1017,7 +1058,7 @@ function ReferenceBrowser({
       .then(async (response) => {
         const body = await response.json()
         if (!response.ok) throw new Error(body.error ?? response.statusText)
-        return body as DatasetInfo
+        return body as ConnectedDataset
       })
       .then(onConnected)
       .catch((reason: Error) => setError(reason.message))
@@ -1040,7 +1081,7 @@ function ReferenceBrowser({
 }
 
 function App() {
-  const [info, setInfo] = useState<DatasetInfo>()
+  const [connection, setConnection] = useState<ConnectedDataset>()
   const [catalog, setCatalog] = useState<ReferenceCatalog>()
   const [pendingCatalog, setPendingCatalog] = useState<ReferenceCatalog>()
   const [files, setFiles] = useState<FileEntry[]>([])
@@ -1049,14 +1090,25 @@ function App() {
   const [mode, setMode] = useState<'infra' | 'user'>('user')
   const [showConnector, setShowConnector] = useState(true)
   const [showReference, setShowReference] = useState(false)
+  const info = connection?.dataset
+  const connectionId = connection?.connection_id
   const tree = useMemo(() => buildTree(files), [files])
 
-  const connected = async (dataset: DatasetInfo) => {
+  useEffect(() => {
+    const reconnect = () => {
+      setShowReference(false)
+      setShowConnector(true)
+    }
+    window.addEventListener('lance-connection-expired', reconnect)
+    return () => window.removeEventListener('lance-connection-expired', reconnect)
+  }, [])
+
+  const connected = async (nextConnection: ConnectedDataset) => {
     try {
-      const response = await fetch('/api/files')
-      if (!response.ok) throw new Error(`Files API returned ${response.status}`)
+      const response = await fetch(connectedUrl('/api/files', nextConnection.connection_id))
+      await requireOk(response)
       const entries = await response.json() as FileEntry[]
-      setInfo(dataset)
+      setConnection(nextConnection)
       if (pendingCatalog) setCatalog(pendingCatalog)
       setPendingCatalog(undefined)
       setFiles(entries)
@@ -1090,7 +1142,7 @@ function App() {
       />
     )
   }
-  if (!info) {
+  if (!info || !connectionId) {
     return <DatasetConnector onDiscovered={discovered} />
   }
 
@@ -1145,16 +1197,18 @@ function App() {
       )}
       <main className="content">
         {mode === 'user' ? (
-          <DatasetQueryView info={info} mode="user" />
+          <DatasetQueryView info={info} mode="user" connectionId={connectionId} />
         ) : (
           <>
             {selection.type === 'overview' && <Overview info={info} />}
-            {selection.type === 'sql' && <DatasetQueryView info={info} mode="infra" />}
+            {selection.type === 'sql' && <DatasetQueryView info={info} mode="infra" connectionId={connectionId} />}
             {selectedFile?.kind === 'manifest' && <ManifestView info={info} file={selectedFile} />}
-            {selectedFile?.kind === 'data' && <DataView info={info} file={selectedFile} />}
+            {selectedFile?.kind === 'data' && <DataView info={info} file={selectedFile} connectionId={connectionId} />}
             {selectedFile?.kind === 'deletion' && <DeletionFileView info={info} file={selectedFile} />}
-            {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} />}
-            {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && <RawFileView file={selectedFile} />}
+            {selectedFile?.kind === 'transaction' && <TransactionFileView file={selectedFile} connectionId={connectionId} />}
+            {selectedFile && !['manifest', 'data', 'deletion', 'transaction'].includes(selectedFile.kind) && (
+              <RawFileView file={selectedFile} connectionId={connectionId} />
+            )}
           </>
         )}
       </main>

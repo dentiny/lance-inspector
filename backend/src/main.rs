@@ -9,7 +9,6 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
-use tokio::sync::RwLock;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -35,9 +34,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let state = Arc::new(AppState {
-        connection: RwLock::new(None),
-    });
+    let state = Arc::new(AppState::new());
 
     let api = Router::new()
         .route("/health", get(api::health))

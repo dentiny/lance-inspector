@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -19,6 +20,12 @@ pub struct DatasetInfo {
     pub manifest: ManifestView,
     pub fragments: Vec<FragmentView>,
     pub branches: Vec<BranchView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectResponse {
+    pub connection_id: Uuid,
+    pub dataset: DatasetInfo,
 }
 
 #[derive(Debug, Serialize)]
