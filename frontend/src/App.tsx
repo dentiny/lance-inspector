@@ -537,15 +537,22 @@ function RowsPanel({
   const [offset, setOffset] = useState(0)
   const [error, setError] = useState('')
   useEffect(() => {
+    const controller = new AbortController()
     setData(undefined)
     setError('')
-    fetch(connectedUrl(`/api/rows?offset=${offset}&limit=20`, connectionId))
+    fetch(connectedUrl(`/api/rows?offset=${offset}&limit=20`, connectionId), {
+      signal: controller.signal,
+    })
       .then(async (response) => {
         await requireOk(response)
         return response.json() as Promise<RowsResponse>
       })
       .then(setData)
-      .catch((reason: Error) => setError(reason.message))
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+    return () => controller.abort()
   }, [connectionId, offset, refreshKey])
 
   return (
@@ -856,15 +863,22 @@ function TransactionFileView({ file, connectionId }: { file: FileEntry; connecti
   const [transaction, setTransaction] = useState<TransactionInfo>()
   const [error, setError] = useState('')
   useEffect(() => {
+    const controller = new AbortController()
     setTransaction(undefined)
     setError('')
-    fetch(connectedUrl(`/api/transaction?path=${encodeURIComponent(file.path)}`, connectionId))
+    fetch(connectedUrl(`/api/transaction?path=${encodeURIComponent(file.path)}`, connectionId), {
+      signal: controller.signal,
+    })
       .then(async (response) => {
         await requireOk(response)
         return response.json() as Promise<TransactionInfo>
       })
       .then(setTransaction)
-      .catch((reason: Error) => setError(reason.message))
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+    return () => controller.abort()
   }, [connectionId, file.path])
 
   return (
@@ -920,13 +934,22 @@ function RawFileView({ file, connectionId }: { file: FileEntry; connectionId: st
   const [preview, setPreview] = useState<{ content: string; format: string; truncated: boolean }>()
   const [error, setError] = useState('')
   useEffect(() => {
-    fetch(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId))
+    const controller = new AbortController()
+    setPreview(undefined)
+    setError('')
+    fetch(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId), {
+      signal: controller.signal,
+    })
       .then(async (response) => {
         await requireOk(response)
         return response.json()
       })
       .then(setPreview)
-      .catch((reason: Error) => setError(reason.message))
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+    return () => controller.abort()
   }, [connectionId, file.path])
   return (
     <div className="page">
