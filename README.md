@@ -144,7 +144,7 @@ Switching modes does not change the selected dataset snapshot.
 
 ![User mode SQL editor with incrementally streamed results](docs/images/user-mode-sql.png)
 
-### Streaming SQL
+### Cursor-paginated SQL
 
 Both modes run DataFusion SQL against a read-only table named `dataset`. The
 default query is:
@@ -159,11 +159,52 @@ the user scrolls, retaining at most 10,000 rows. Page sequence numbers make
 retries idempotent after a network timeout; applying another query or switching
 snapshots cancels the previous cursor.
 
-Blob values are still loaded independently: SQL streams scalar values and Blob
-descriptors, while media bytes are requested only when their result cells
-approach the visible scroll area. `SELECT *` includes the internal `_rowaddr`
-needed for media URLs. If selecting Blob columns explicitly, also select
-`_rowaddr` and the corresponding MIME column.
+The query lifecycle is:
+
+1. `POST /api/sql/start` builds the DataFusion query once, stores its
+   forward-only `RecordBatch` stream, and returns an opaque cursor ID plus the
+   result schema.
+2. `GET /api/sql/:cursor_id/page?sequence=N` advances that same stream until it
+   has at most 100 rows. It does not rerun the SQL or use `OFFSET`.
+3. The backend caches the most recently completed page before returning it.
+   Retrying the same sequence therefore returns identical rows without
+   advancing DataFusion twice.
+4. `POST /api/sql/:cursor_id/cancel` releases the stream when a query is
+   replaced, its snapshot changes, or its view is closed.
+
+This bounds application-layer work to the current Arrow batch, pending rows,
+and one cached response rather than collecting the complete result. It does not
+change SQL operator semantics: `ORDER BY`, joins, and aggregations may still
+need DataFusion to read or materialize substantial intermediate state before
+the first page is available.
+
+#### Cursor failure handling
+
+- A lost HTTP response or transient client-to-server network failure is
+  recoverable: the client retries the same sequence and receives the cached
+  page.
+- A DataFusion, Arrow projection, or row-serialization failure invalidates and
+  removes the cursor. The API returns `422 Unprocessable Entity`, and the UI
+  offers **Rerun query** rather than retrying a terminal stream.
+- An unknown, cancelled, or idle-expired cursor returns `404 Not Found`; rerun
+  the query to create a new cursor.
+- An expired dataset connection returns `410 Gone`; reconnect the dataset
+  before running SQL again.
+- Backend restarts are not resumable because cursor state is currently
+  in-memory.
+
+Cursors are isolated by dataset connection, limited to 256 server-wide, and
+expire after ten idle minutes. Only the latest page is retained for idempotent
+retry because the browser issues one sequential request at a time.
+
+Blob values remain independent: SQL pages contain scalar values, MIME columns,
+and `_rowaddr`, while media bytes are requested only when their result cells
+approach the visible scroll area. If selecting Blob columns explicitly, also
+select `_rowaddr` and the corresponding MIME column.
+
+The browser currently retains fetched scalar rows up to the 10,000-row cap.
+Row virtualization and byte-bounded page caching remain follow-up work for
+large or unusually wide query results.
 
 The same workflow is available through Make:
 
