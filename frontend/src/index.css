@@ -148,6 +148,21 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 }
 .sidebar-label span { font: 10px var(--mono); }
 .file-tree { overflow: auto; padding: 2px 8px 18px; flex: 1; }
+.load-more-files {
+  width: calc(100% - 12px);
+  margin: 10px 6px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.load-more-files:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.load-more-files:disabled { cursor: wait; opacity: .65; }
 .tree-row {
   width: 100%;
   height: 28px;

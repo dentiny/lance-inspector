@@ -97,6 +97,11 @@ type FileEntry = {
   modified: string
 }
 
+type FilesPage = {
+  entries: FileEntry[]
+  next_offset: number | null
+}
+
 type TreeNode = {
   name: string
   path: string
@@ -1230,14 +1235,21 @@ function App() {
   const [catalog, setCatalog] = useState<ReferenceCatalog>()
   const [pendingCatalog, setPendingCatalog] = useState<ReferenceCatalog>()
   const [files, setFiles] = useState<FileEntry[]>([])
+  const [nextFileOffset, setNextFileOffset] = useState<number | null>(null)
+  const [loadingFiles, setLoadingFiles] = useState(false)
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
   const [error, setError] = useState('')
   const [mode, setMode] = useState<'infra' | 'user'>('user')
   const [showConnector, setShowConnector] = useState(true)
   const [showReference, setShowReference] = useState(false)
+  const fileRequest = useRef<AbortController | undefined>(undefined)
+  const fileGeneration = useRef(0)
   const info = connection?.dataset
   const connectionId = connection?.connection_id
-  const tree = useMemo(() => buildTree(files), [files])
+  const tree = useMemo(
+    () => buildTree([...files].sort((left, right) => left.path.localeCompare(right.path))),
+    [files],
+  )
 
   useEffect(() => {
     const reconnect = () => {
@@ -1249,20 +1261,60 @@ function App() {
   }, [])
 
   const connected = async (nextConnection: ConnectedDataset) => {
+    fileRequest.current?.abort()
+    const controller = new AbortController()
+    fileRequest.current = controller
+    const generation = ++fileGeneration.current
     try {
-      const response = await fetch(connectedUrl('/api/files', nextConnection.connection_id))
+      const response = await fetch(
+        connectedUrl('/api/files?offset=0&limit=500', nextConnection.connection_id),
+        { signal: controller.signal },
+      )
       await requireOk(response)
-      const entries = await response.json() as FileEntry[]
+      const page = await response.json() as FilesPage
+      if (generation !== fileGeneration.current) return
       setConnection(nextConnection)
       if (pendingCatalog) setCatalog(pendingCatalog)
       setPendingCatalog(undefined)
-      setFiles(entries)
+      setFiles(page.entries)
+      setNextFileOffset(page.next_offset)
       setSelection({ type: 'overview' })
       setShowConnector(false)
       setShowReference(false)
       setError('')
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === 'AbortError') return
       setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (generation === fileGeneration.current) fileRequest.current = undefined
+    }
+  }
+
+  const loadMoreFiles = async () => {
+    if (!connectionId || nextFileOffset === null || loadingFiles) return
+    const controller = new AbortController()
+    fileRequest.current = controller
+    const generation = fileGeneration.current
+    setLoadingFiles(true)
+    try {
+      const response = await fetch(
+        connectedUrl(`/api/files?offset=${nextFileOffset}&limit=500`, connectionId),
+        { signal: controller.signal },
+      )
+      await requireOk(response)
+      const page = await response.json() as FilesPage
+      if (generation !== fileGeneration.current) return
+      setFiles((current) => [...current, ...page.entries])
+      setNextFileOffset(page.next_offset)
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (generation === fileGeneration.current) {
+        fileRequest.current = undefined
+        setLoadingFiles(false)
+      }
     }
   }
 
@@ -1336,6 +1388,11 @@ function App() {
                 onSelect={(file) => setSelection({ type: 'file', file })}
               />
             ))}
+            {nextFileOffset !== null && (
+              <button className="load-more-files" onClick={loadMoreFiles} disabled={loadingFiles}>
+                {loadingFiles ? <><RefreshCw className="spin" size={13} />Loading files…</> : 'Load more files'}
+              </button>
+            )}
           </nav>
           <div className="sidebar-footer"><Braces size={14} /><span>Lance format inspector</span></div>
         </aside>

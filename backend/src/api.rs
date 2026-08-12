@@ -28,17 +28,19 @@ use lance::{
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
 use crate::models::{
     BranchHistory, BranchView, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FileEntry,
-    FilePreview, FragmentView, HealthResponse, ManifestView, MediaColumn, ReferenceCatalog,
-    RowsResponse, SchemaField, SqlCursorResponse, SqlPageResponse, TagView, TransactionView,
-    VersionView,
+    FilePreview, FilesPage, FragmentView, HealthResponse, ManifestView, MediaColumn,
+    ReferenceCatalog, RowsResponse, SchemaField, SqlCursorResponse, SqlPageResponse, TagView,
+    TransactionView, VersionView,
 };
 
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
+const DEFAULT_FILES_PAGE_SIZE: usize = 500;
+const MAX_FILES_PAGE_SIZE: usize = 1_000;
 const MAX_ROWS: usize = 100;
 const SQL_PAGE_ROWS: usize = 100;
 const MAX_SQL_RESULT_ROWS: usize = 10_000;
@@ -67,6 +69,7 @@ impl AppState {
 struct SessionEntry {
     connection: ConnectedDataset,
     last_accessed: Arc<Mutex<Instant>>,
+    file_listing: Arc<AsyncMutex<Option<FileListing>>>,
 }
 
 impl SessionEntry {
@@ -74,6 +77,7 @@ impl SessionEntry {
         Self {
             connection,
             last_accessed: Arc::new(Mutex::new(Instant::now())),
+            file_listing: Arc::new(AsyncMutex::new(None)),
         }
     }
 
@@ -108,6 +112,14 @@ struct QueryCursor {
     last_page: Option<SqlPageResponse>,
     last_accessed: Instant,
     done: bool,
+}
+
+struct FileListing {
+    receiver: mpsc::Receiver<Result<FileEntry, String>>,
+    pending: Option<FileEntry>,
+    next_offset: usize,
+    last_offset: Option<usize>,
+    last_page: Option<FilesPage>,
 }
 
 pub struct ApiError(anyhow::Error);
@@ -415,14 +427,22 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
 }
 
 fn connected(state: &AppState, connection_id: Uuid) -> Result<ConnectedDataset> {
+    connected_session(state, connection_id).map(|(_, connection)| connection)
+}
+
+fn connected_session(
+    state: &AppState,
+    connection_id: Uuid,
+) -> Result<(SessionEntry, ConnectedDataset)> {
     let entry = state
         .connections
         .get(&connection_id)
         .ok_or(UnknownConnection(connection_id))?;
-    if let Some(connection) = entry.value().access() {
-        return Ok(connection);
-    }
+    let session = entry.value().clone();
     drop(entry);
+    if let Some(connection) = session.access() {
+        return Ok((session, connection));
+    }
     state.connections.remove(&connection_id);
     Err(UnknownConnection(connection_id).into())
 }
@@ -459,11 +479,17 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
         let metadata = file_fragment.metadata();
         let deletion = if let Some(deletion_file) = &metadata.deletion_file {
             let vector = file_fragment.get_deletion_vector().await?;
-            let all_offsets: Vec<u32> = vector
-                .as_deref()
-                .into_iter()
-                .flat_map(|value| value.iter())
-                .collect();
+            let (count, offsets) = if let Some(vector) = vector.as_deref() {
+                let count = vector.len();
+                let mut offsets = Vec::new();
+                if count > 0 {
+                    offsets.reserve(count.min(MAX_DELETION_OFFSETS));
+                    offsets.extend(vector.iter().take(MAX_DELETION_OFFSETS));
+                }
+                (count, offsets)
+            } else {
+                (0, Vec::new())
+            };
             let file_type = format!("{:?}", deletion_file.file_type);
             let extension = if file_type.to_ascii_lowercase().contains("array") {
                 "arrow"
@@ -478,13 +504,9 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
                 file_type,
                 read_version: deletion_file.read_version,
                 id: deletion_file.id,
-                count: all_offsets.len(),
-                offsets: all_offsets
-                    .iter()
-                    .copied()
-                    .take(MAX_DELETION_OFFSETS)
-                    .collect(),
-                offsets_truncated: all_offsets.len() > MAX_DELETION_OFFSETS,
+                count,
+                offsets,
+                offsets_truncated: count > MAX_DELETION_OFFSETS,
             })
         } else {
             None
@@ -571,42 +593,149 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
 
 pub async fn files(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConnectionQuery>,
-) -> Result<Json<Vec<FileEntry>>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    list_files(&connection).await.map(Json).map_err(ApiError)
+    Query(query): Query<FilesQuery>,
+) -> Result<Json<FilesPage>, ApiError> {
+    files_page(state, query).await.map(Json).map_err(ApiError)
 }
 
-async fn list_files(connection: &ConnectedDataset) -> Result<Vec<FileEntry>> {
+#[derive(Debug, Deserialize)]
+pub struct FilesQuery {
+    connection_id: Uuid,
+    #[serde(default)]
+    offset: usize,
+    limit: Option<usize>,
+}
+
+async fn files_page(state: Arc<AppState>, query: FilesQuery) -> Result<FilesPage> {
+    let (session, connection) = connected_session(&state, query.connection_id)?;
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_FILES_PAGE_SIZE)
+        .clamp(1, MAX_FILES_PAGE_SIZE);
+    let mut guard = session.file_listing.lock().await;
+    if guard.is_none() {
+        if query.offset != 0 {
+            bail!(InvalidRequest(
+                "the first file page must start at offset 0".to_string()
+            ));
+        }
+        *guard = Some(start_file_listing(&connection).await?);
+    }
+
+    let result = read_file_page(
+        guard.as_mut().expect("file listing initialized"),
+        query.offset,
+        limit,
+    )
+    .await;
+    if result.is_err() {
+        *guard = None;
+    }
+    result
+}
+
+async fn start_file_listing(connection: &ConnectedDataset) -> Result<FileListing> {
     let store = connection.dataset.object_store(None).await?;
     let base = connection.dataset.branch_location().path;
-    let base_string = base.as_ref().trim_end_matches('/');
-    let objects = store
-        .read_dir_all(&base, None)
-        .try_collect::<Vec<_>>()
-        .await?;
+    let base_string = base.as_ref().trim_end_matches('/').to_string();
+    let (sender, receiver) = mpsc::channel(MAX_FILES_PAGE_SIZE * 2);
 
-    let mut entries: Vec<_> = objects
-        .into_iter()
-        .filter_map(|object| {
-            let full_path = object.location.as_ref();
-            let relative = full_path
-                .strip_prefix(base_string)
-                .unwrap_or(full_path)
-                .trim_start_matches('/');
-            if relative.is_empty() {
-                return None;
+    tokio::spawn(async move {
+        let mut objects = store.read_dir_all(&base, None);
+        while let Some(result) = objects.next().await {
+            let entry = result
+                .map_err(|error| error.to_string())
+                .and_then(|object| {
+                    let full_path = object.location.as_ref();
+                    let relative = full_path
+                        .strip_prefix(&base_string)
+                        .unwrap_or(full_path)
+                        .trim_start_matches('/');
+                    if relative.is_empty() {
+                        return Ok(None);
+                    }
+                    Ok(Some(FileEntry {
+                        path: relative.to_string(),
+                        size: object.size,
+                        kind: classify_file(relative),
+                        modified: object.last_modified.to_string(),
+                    }))
+                });
+            match entry {
+                Ok(None) => continue,
+                Ok(Some(entry)) => {
+                    if sender.send(Ok(entry)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error)).await;
+                    break;
+                }
             }
-            Some(FileEntry {
-                path: relative.to_string(),
-                size: object.size,
-                kind: classify_file(relative),
-                modified: object.last_modified.to_string(),
-            })
-        })
-        .collect();
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(entries)
+        }
+    });
+
+    Ok(FileListing {
+        receiver,
+        pending: None,
+        next_offset: 0,
+        last_offset: None,
+        last_page: None,
+    })
+}
+
+async fn read_file_page(
+    listing: &mut FileListing,
+    offset: usize,
+    limit: usize,
+) -> Result<FilesPage> {
+    if listing.last_offset == Some(offset) {
+        return Ok(listing
+            .last_page
+            .as_ref()
+            .expect("last file page set with offset")
+            .clone());
+    }
+    if offset != listing.next_offset {
+        bail!(InvalidRequest(format!(
+            "expected file offset {}, received {offset}",
+            listing.next_offset
+        )));
+    }
+
+    let mut entries = Vec::with_capacity(limit);
+    if let Some(entry) = listing.pending.take() {
+        entries.push(entry);
+    }
+    while entries.len() < limit {
+        match listing.receiver.recv().await {
+            Some(Ok(entry)) => entries.push(entry),
+            Some(Err(error)) => bail!("failed to list dataset files: {error}"),
+            None => break,
+        }
+    }
+
+    let has_more = if entries.len() == limit {
+        match listing.receiver.recv().await {
+            Some(Ok(entry)) => {
+                listing.pending = Some(entry);
+                true
+            }
+            Some(Err(error)) => bail!("failed to list dataset files: {error}"),
+            None => false,
+        }
+    } else {
+        false
+    };
+    let page = FilesPage {
+        next_offset: has_more.then_some(offset + entries.len()),
+        entries,
+    };
+    listing.next_offset = page.next_offset.unwrap_or(offset + page.entries.len());
+    listing.last_offset = Some(offset);
+    listing.last_page = Some(page.clone());
+    Ok(page)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1258,6 +1387,55 @@ mod tests {
         assert_eq!(classify_file("data/part.lance"), "data");
         assert_eq!(classify_file("_deletions/0-1-2.arrow"), "deletion");
         assert_eq!(classify_file("_indices/index/file"), "index");
+    }
+
+    #[tokio::test]
+    async fn file_listing_pages_once_and_retries_idempotently() {
+        let (sender, receiver) = mpsc::channel(8);
+        for index in 0..5 {
+            sender
+                .send(Ok(FileEntry {
+                    path: format!("data/{index}.lance"),
+                    size: index,
+                    kind: "data",
+                    modified: "now".to_string(),
+                }))
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        let mut listing = FileListing {
+            receiver,
+            pending: None,
+            next_offset: 0,
+            last_offset: None,
+            last_page: None,
+        };
+
+        let first = read_file_page(&mut listing, 0, 2).await.unwrap();
+        assert_eq!(first.entries.len(), 2);
+        assert_eq!(first.next_offset, Some(2));
+        let retry = read_file_page(&mut listing, 0, 2).await.unwrap();
+        assert_eq!(
+            retry
+                .entries
+                .iter()
+                .map(|entry| &entry.path)
+                .collect::<Vec<_>>(),
+            first
+                .entries
+                .iter()
+                .map(|entry| &entry.path)
+                .collect::<Vec<_>>()
+        );
+
+        let second = read_file_page(&mut listing, 2, 2).await.unwrap();
+        assert_eq!(second.entries.len(), 2);
+        assert_eq!(second.next_offset, Some(4));
+        let last = read_file_page(&mut listing, 4, 2).await.unwrap();
+        assert_eq!(last.entries.len(), 1);
+        assert_eq!(last.next_offset, None);
+        assert!(read_file_page(&mut listing, 7, 2).await.is_err());
     }
 
     #[test]
