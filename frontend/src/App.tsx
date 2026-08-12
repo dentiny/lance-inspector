@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -379,14 +379,66 @@ function MediaValue({
   column: RowsResponse['media_columns'][number]
   row: Record<string, unknown>
 }) {
+  const container = useRef<HTMLDivElement>(null)
+  const [nearViewport, setNearViewport] = useState(false)
   const rowAddress = row._rowaddr
-  if (rowAddress == null) return <span>—</span>
   const mime = column.mime_column ? String(row[column.mime_column] ?? '') : ''
+  const kind = mime.startsWith('image/')
+    ? 'image'
+    : mime.startsWith('audio/')
+      ? 'audio'
+      : mime.startsWith('video/')
+        ? 'video'
+        : 'blob'
+
+  useEffect(() => {
+    const element = container.current
+    if (!element || nearViewport) return
+    if (!('IntersectionObserver' in window)) {
+      setNearViewport(true)
+      return
+    }
+    const scrollContainer = element.closest('.table-scroll')
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setNearViewport(true)
+          observer.disconnect()
+        }
+      },
+      {
+        root: scrollContainer,
+        rootMargin: '160px 240px',
+        threshold: 0.01,
+      },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [nearViewport])
+
+  if (rowAddress == null) return <span>—</span>
   const source = `/api/media/${encodeURIComponent(column.name)}/${rowAddress}?mime=${encodeURIComponent(mime)}`
-  if (mime.startsWith('image/')) return <img className="media-image" src={source} loading="lazy" alt={`${column.name} preview`} />
-  if (mime.startsWith('audio/')) return <audio className="media-audio" src={source} controls preload="none" />
-  if (mime.startsWith('video/')) return <video className="media-video" src={source} controls preload="metadata" />
-  return <a className="blob-link" href={source} target="_blank">open blob</a>
+  let content
+  if (!nearViewport) {
+    content = <span className="media-lazy-label">Blob</span>
+  } else if (kind === 'image') {
+    content = <img className="media-image" src={source} alt={`${column.name} preview`} />
+  } else if (kind === 'audio') {
+    content = <audio className="media-audio" src={source} controls preload="none" />
+  } else if (kind === 'video') {
+    content = <video className="media-video" src={source} controls preload="metadata" />
+  } else {
+    content = <a className="blob-link" href={source} target="_blank">open blob</a>
+  }
+  return (
+    <div
+      ref={container}
+      className={`media-lazy-slot media-lazy-${kind}`}
+      data-media-state={nearViewport ? 'ready' : 'deferred'}
+    >
+      {content}
+    </div>
+  )
 }
 
 function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; title?: string }) {

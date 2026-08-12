@@ -38,6 +38,8 @@ dashboard or dataset editor.
   offsets instead of silently hiding tombstones.
 - Previews live rows in pages of 20 and renders Blob V2 images, audio, and video
   with native browser controls.
+- Defers Blob media requests until their table cells approach the visible
+  scroll area, so offscreen Blob bytes are not read eagerly.
 - Supports HTTP byte ranges for efficient media streaming.
 - Uses the same Lance object-store integration for local paths and S3.
 - Renders snapshot lineage as an interactive graph with branch lanes, version
