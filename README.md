@@ -52,7 +52,7 @@ dashboard or dataset editor.
 
 ### Multimodal row inspection
 
-![Rows with image, audio, and video previews in Infra mode](docs/images/multimodal-preview-infra.png)
+![Streaming SQL results with image, audible audio, and video Blob previews in User mode](docs/images/multimodal-preview-user.png)
 
 ### Human-readable transaction history
 
