@@ -1,4 +1,9 @@
-use std::{collections::HashSet, io, sync::Arc};
+use std::{
+    collections::HashSet,
+    io,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use arrow_array::RecordBatch;
@@ -15,6 +20,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
+use foyer::{Cache, CacheBuilder};
 use futures::{StreamExt, TryStreamExt};
 use lance::{
     Dataset,
@@ -23,22 +29,60 @@ use lance::{
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::models::{
-    BranchHistory, BranchView, DataFileView, DatasetInfo, DeletionView, FileEntry, FilePreview,
-    FragmentView, HealthResponse, ManifestView, MediaColumn, ReferenceCatalog, RowsResponse,
-    SchemaField, TagView, TransactionView, VersionView,
+    BranchHistory, BranchView, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FileEntry,
+    FilePreview, FragmentView, HealthResponse, ManifestView, MediaColumn, ReferenceCatalog,
+    RowsResponse, SchemaField, TagView, TransactionView, VersionView,
 };
 
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
 const MAX_ROWS: usize = 100;
 const SQL_STREAM_CHUNK_ROWS: usize = 100;
 const MAX_DELETION_OFFSETS: usize = 2_000;
+const MAX_CONNECTIONS: usize = 256;
+const CONNECTION_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 const BLOB_EXTENSION: &str = "lance.blob.v2";
 
 pub struct AppState {
-    pub connection: RwLock<Option<ConnectedDataset>>,
+    connections: Cache<Uuid, SessionEntry>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            connections: CacheBuilder::new(MAX_CONNECTIONS).build(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SessionEntry {
+    connection: ConnectedDataset,
+    last_accessed: Arc<Mutex<Instant>>,
+}
+
+impl SessionEntry {
+    fn new(connection: ConnectedDataset) -> Self {
+        Self {
+            connection,
+            last_accessed: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+
+    fn access(&self) -> Option<ConnectedDataset> {
+        let now = Instant::now();
+        let mut last_accessed = self
+            .last_accessed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if now.duration_since(*last_accessed) >= CONNECTION_IDLE_TTL {
+            return None;
+        }
+        *last_accessed = now;
+        Some(self.connection.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -51,18 +95,22 @@ pub struct ConnectedDataset {
 pub struct ApiError(anyhow::Error);
 
 #[derive(Debug)]
-struct NoDataset;
+struct UnknownConnection(Uuid);
 
 #[derive(Debug)]
 struct InvalidRequest(String);
 
-impl std::fmt::Display for NoDataset {
+impl std::fmt::Display for UnknownConnection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("no dataset is connected")
+        write!(
+            formatter,
+            "connection {} was not found or has expired; reconnect the dataset",
+            self.0
+        )
     }
 }
 
-impl std::error::Error for NoDataset {}
+impl std::error::Error for UnknownConnection {}
 
 impl std::fmt::Display for InvalidRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,8 +122,8 @@ impl std::error::Error for InvalidRequest {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let status = if self.0.downcast_ref::<NoDataset>().is_some() {
-            StatusCode::CONFLICT
+        let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
+            StatusCode::GONE
         } else if self.0.downcast_ref::<InvalidRequest>().is_some() {
             StatusCode::BAD_REQUEST
         } else {
@@ -91,8 +139,9 @@ pub async fn health() -> Json<HealthResponse> {
 
 pub async fn dataset_info(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ConnectionQuery>,
 ) -> Result<Json<DatasetInfo>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     build_dataset_info(&connection)
         .await
         .map(Json)
@@ -103,6 +152,11 @@ pub async fn dataset_info(
 pub struct ConnectRequest {
     uri: String,
     reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConnectionQuery {
+    connection_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,11 +239,11 @@ async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
 pub async fn connect_dataset(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConnectRequest>,
-) -> Result<Json<DatasetInfo>, ApiError> {
+) -> Result<Json<ConnectResponse>, ApiError> {
     connect(&state, request).await.map(Json).map_err(ApiError)
 }
 
-async fn connect(state: &AppState, request: ConnectRequest) -> Result<DatasetInfo> {
+async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectResponse> {
     let uri = request.uri.trim();
     if uri.is_empty() {
         bail!("dataset location cannot be empty");
@@ -209,8 +263,15 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<DatasetInf
         dataset_uri: uri.to_string(),
         reference: reference.to_string(),
     };
-    *state.connection.write().await = Some(connection.clone());
-    build_dataset_info(&connection).await
+    let dataset = build_dataset_info(&connection).await?;
+    let connection_id = Uuid::new_v4();
+    state
+        .connections
+        .insert(connection_id, SessionEntry::new(connection));
+    Ok(ConnectResponse {
+        connection_id,
+        dataset,
+    })
 }
 
 async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
@@ -272,13 +333,17 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
     )
 }
 
-async fn connected(state: &AppState) -> Result<ConnectedDataset> {
-    state
-        .connection
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| NoDataset.into())
+fn connected(state: &AppState, connection_id: Uuid) -> Result<ConnectedDataset> {
+    let entry = state
+        .connections
+        .get(&connection_id)
+        .ok_or(UnknownConnection(connection_id))?;
+    if let Some(connection) = entry.value().access() {
+        return Ok(connection);
+    }
+    drop(entry);
+    state.connections.remove(&connection_id);
+    Err(UnknownConnection(connection_id).into())
 }
 
 async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo> {
@@ -423,8 +488,11 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
     })
 }
 
-pub async fn files(State(state): State<Arc<AppState>>) -> Result<Json<Vec<FileEntry>>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+pub async fn files(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ConnectionQuery>,
+) -> Result<Json<Vec<FileEntry>>, ApiError> {
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     list_files(&connection).await.map(Json).map_err(ApiError)
 }
 
@@ -462,6 +530,7 @@ async fn list_files(connection: &ConnectedDataset) -> Result<Vec<FileEntry>> {
 
 #[derive(Debug, Deserialize)]
 pub struct FileQuery {
+    connection_id: Uuid,
     path: String,
 }
 
@@ -469,7 +538,7 @@ pub async fn file_preview(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FilePreview>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     read_file_preview(&connection, &query.path)
         .await
         .map(Json)
@@ -521,7 +590,7 @@ pub async fn transaction(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<TransactionView>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     read_transaction(&connection, &query.path)
         .await
         .map(Json)
@@ -624,6 +693,7 @@ fn fragment_json(fragment: &lance::table::format::Fragment) -> Value {
 
 #[derive(Debug, Deserialize)]
 pub struct RowsQuery {
+    connection_id: Uuid,
     #[serde(default)]
     offset: usize,
     #[serde(default = "default_row_limit")]
@@ -638,7 +708,7 @@ pub async fn rows(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RowsQuery>,
 ) -> Result<Json<RowsResponse>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     read_rows(&connection, query)
         .await
         .map(Json)
@@ -707,9 +777,10 @@ pub struct SqlRequest {
 
 pub async fn sql(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ConnectionQuery>,
     Json(request): Json<SqlRequest>,
 ) -> Result<Response<Body>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     stream_sql(&connection, &request.sql)
         .await
         .map_err(ApiError)
@@ -826,6 +897,7 @@ fn serialize_rows(batch: &RecordBatch) -> Result<Vec<Value>, io::Error> {
 
 #[derive(Debug, Deserialize)]
 pub struct MediaQuery {
+    connection_id: Uuid,
     mime: Option<String>,
 }
 
@@ -835,7 +907,7 @@ pub async fn media(
     Query(query): Query<MediaQuery>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, ApiError> {
-    let connection = connected(&state).await.map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
     read_media(&connection, &column, row_address, query, &headers)
         .await
         .map_err(ApiError)
@@ -956,6 +1028,8 @@ fn validate_relative_path(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::RecordBatchIterator;
+    use arrow_schema::{DataType, Field};
 
     #[test]
     fn classifies_lance_internal_files() {
@@ -992,5 +1066,67 @@ mod tests {
         assert!(read_only_sql("DELETE FROM dataset").is_err());
         assert!(read_only_sql("CREATE EXTERNAL TABLE secret").is_err());
         assert!(read_only_sql("  ").is_err());
+    }
+
+    #[tokio::test]
+    async fn isolates_connections_and_rejects_unknown_ids() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let reader = RecordBatchIterator::new(
+            Vec::<std::result::Result<RecordBatch, arrow_schema::ArrowError>>::new().into_iter(),
+            schema,
+        );
+        let uri = format!("memory://session-test-{}", Uuid::new_v4());
+        let dataset = Arc::new(Dataset::write(reader, &uri, None).await.unwrap());
+        let state = AppState::new();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        state.connections.insert(
+            first_id,
+            SessionEntry::new(ConnectedDataset {
+                dataset: dataset.clone(),
+                dataset_uri: "memory://first".to_string(),
+                reference: "main".to_string(),
+            }),
+        );
+        state.connections.insert(
+            second_id,
+            SessionEntry::new(ConnectedDataset {
+                dataset,
+                dataset_uri: "memory://second".to_string(),
+                reference: "version:1".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            connected(&state, first_id).unwrap().dataset_uri,
+            "memory://first"
+        );
+        assert_eq!(
+            connected(&state, second_id).unwrap().dataset_uri,
+            "memory://second"
+        );
+
+        let unknown_id = Uuid::new_v4();
+        let error = match connected(&state, unknown_id) {
+            Ok(_) => panic!("unknown connection unexpectedly resolved"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<UnknownConnection>()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(
+                format!(
+                    "connection {unknown_id} was not found or has expired; reconnect the dataset"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(ApiError(error).into_response().status(), StatusCode::GONE);
     }
 }

@@ -213,13 +213,17 @@ kubectl port-forward service/lance-inspector 8080:80
 
 ## API
 
-- `GET /api/dataset` — schema, active manifest, fragments, branches, deletions
 - `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
-- `POST /api/dataset/connect` — open a local/S3 dataset at a branch, version, or tag
-- `POST /api/sql` — stream read-only SQL results as schema and NDJSON row chunks
-- `GET /api/files` — recursive storage hierarchy for local paths or S3
-- `GET /api/transaction?path=...` — decoded protobuf transaction and operation
-- `GET /api/rows?offset=0&limit=20` — paginated live-row preview
-- `GET /api/media/:column/:row_address` — range-enabled Blob V2 streaming
-- `GET /api/file?path=...` — bounded text/hex preview for internal files
+- `POST /api/dataset/connect` — open a local/S3 snapshot and return its metadata plus an opaque `connection_id`
+- `GET /api/dataset?connection_id=...` — schema, active manifest, fragments, branches, deletions
+- `POST /api/sql?connection_id=...` — stream read-only SQL results as schema and NDJSON row chunks
+- `GET /api/files?connection_id=...` — recursive storage hierarchy for local paths or S3
+- `GET /api/transaction?connection_id=...&path=...` — decoded protobuf transaction and operation
+- `GET /api/rows?connection_id=...&offset=0&limit=20` — paginated live-row preview
+- `GET /api/media/:column/:row_address?connection_id=...` — range-enabled Blob V2 streaming
+- `GET /api/file?connection_id=...&path=...` — bounded text/hex preview for internal files
 - `GET /api/health` — health check
+
+Connections are isolated per browser tab, bounded on the server, and expire
+after one hour without access. Reconnect the dataset after a `410 Gone`
+response.
