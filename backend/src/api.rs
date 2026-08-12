@@ -124,6 +124,12 @@ struct InvalidRequest(String);
 #[derive(Debug)]
 struct QueryExecutionFailed(String);
 
+#[derive(Debug)]
+struct RangeNotSatisfiable {
+    size: u64,
+    message: String,
+}
+
 impl std::fmt::Display for UnknownConnection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -168,8 +174,31 @@ impl std::fmt::Display for QueryExecutionFailed {
 
 impl std::error::Error for QueryExecutionFailed {}
 
+impl std::fmt::Display for RangeNotSatisfiable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RangeNotSatisfiable {}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        if let Some(error) = self.0.downcast_ref::<RangeNotSatisfiable>() {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                    (
+                        CONTENT_RANGE,
+                        HeaderValue::from_str(&format!("bytes */{}", error.size))
+                            .expect("blob size always produces a valid header"),
+                    ),
+                ],
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
         let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
             StatusCode::GONE
         } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
@@ -1130,22 +1159,49 @@ fn parse_range(header: Option<&HeaderValue>, size: u64) -> Result<(u64, u64, boo
     let Some(header) = header else {
         return Ok((0, size, false));
     };
-    let value = header.to_str()?;
+    let invalid = |message: &str| {
+        anyhow!(RangeNotSatisfiable {
+            size,
+            message: message.to_string(),
+        })
+    };
+    let value = header
+        .to_str()
+        .map_err(|_| invalid("range header is not valid ASCII"))?;
     let range = value
         .strip_prefix("bytes=")
-        .ok_or_else(|| anyhow!("unsupported range header"))?;
+        .ok_or_else(|| invalid("unsupported range header"))?;
     let (start, end) = range
         .split_once('-')
-        .ok_or_else(|| anyhow!("invalid range header"))?;
-    let start: u64 = start.parse()?;
+        .ok_or_else(|| invalid("invalid range header"))?;
+
+    if start.is_empty() {
+        let suffix_length = end
+            .parse::<u64>()
+            .map_err(|_| invalid("invalid suffix range"))?;
+        if suffix_length == 0 || size == 0 {
+            return Err(invalid("requested range is outside the blob"));
+        }
+        return Ok((size.saturating_sub(suffix_length), size, true));
+    }
+
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| invalid("invalid range start"))?;
+    if start >= size {
+        return Err(invalid("requested range is outside the blob"));
+    }
     let end = if end.is_empty() {
         size
     } else {
-        end.parse::<u64>()?.saturating_add(1).min(size)
+        let inclusive_end = end
+            .parse::<u64>()
+            .map_err(|_| invalid("invalid range end"))?;
+        if inclusive_end < start {
+            return Err(invalid("range end precedes range start"));
+        }
+        inclusive_end.saturating_add(1).min(size)
     };
-    if start >= end || start >= size {
-        bail!("requested range is outside the blob");
-    }
     Ok((start, end, true))
 }
 
@@ -1218,7 +1274,26 @@ mod tests {
         assert_eq!(parse_range(Some(&header), 100).unwrap(), (10, 20, true));
         let open = HeaderValue::from_static("bytes=90-");
         assert_eq!(parse_range(Some(&open), 100).unwrap(), (90, 100, true));
+        let suffix = HeaderValue::from_static("bytes=-20");
+        assert_eq!(parse_range(Some(&suffix), 100).unwrap(), (80, 100, true));
+        let oversized_suffix = HeaderValue::from_static("bytes=-500");
+        assert_eq!(
+            parse_range(Some(&oversized_suffix), 100).unwrap(),
+            (0, 100, true)
+        );
         assert_eq!(parse_range(None, 100).unwrap(), (0, 100, false));
+    }
+
+    #[test]
+    fn rejects_invalid_http_byte_ranges_with_416() {
+        for value in ["items=0-1", "bytes=100-", "bytes=20-10", "bytes=-0"] {
+            let header = HeaderValue::from_str(value).unwrap();
+            let error = parse_range(Some(&header), 100).unwrap_err();
+            let response = ApiError(error).into_response();
+            assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(response.headers()[CONTENT_RANGE], "bytes */100");
+            assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+        }
     }
 
     #[test]
