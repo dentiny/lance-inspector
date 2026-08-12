@@ -122,12 +122,18 @@ pub struct TagView {
     pub version: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FileEntry {
     pub path: String,
     pub size: u64,
     pub kind: &'static str,
     pub modified: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FilesPage {
+    pub entries: Vec<FileEntry>,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
