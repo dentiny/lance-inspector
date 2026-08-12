@@ -144,7 +144,7 @@ Switching modes does not change the selected dataset snapshot.
 
 ![User mode SQL editor with incrementally streamed results](docs/images/user-mode-sql.png)
 
-### Streaming SQL
+### Cursor-paginated SQL
 
 Both modes run DataFusion SQL against a read-only table named `dataset`. The
 default query is:
@@ -153,16 +153,58 @@ default query is:
 SELECT * FROM dataset
 ```
 
-Only `SELECT` and `WITH` queries are accepted. Results are returned as NDJSON:
-one schema event followed by row chunks of at most 100 rows. The browser renders
-each chunk as it arrives instead of buffering the full result before display.
-Applying another query or switching snapshots cancels the previous stream.
+Only `SELECT` and `WITH` queries are accepted. Each query runs once and creates
+a server-side cursor. The browser pulls 100 rows at a time from that cursor as
+the user scrolls, retaining at most 10,000 rows. Page sequence numbers make
+retries idempotent after a network timeout; applying another query or switching
+snapshots cancels the previous cursor.
 
-Blob values are still loaded independently: SQL streams scalar values and Blob
-descriptors, while media bytes are requested only when their result cells
-approach the visible scroll area. `SELECT *` includes the internal `_rowaddr`
-needed for media URLs. If selecting Blob columns explicitly, also select
-`_rowaddr` and the corresponding MIME column.
+The query lifecycle is:
+
+1. `POST /api/sql/start` builds the DataFusion query once, stores its
+   forward-only `RecordBatch` stream, and returns an opaque cursor ID plus the
+   result schema.
+2. `GET /api/sql/:cursor_id/page?sequence=N` advances that same stream until it
+   has at most 100 rows. It does not rerun the SQL or use `OFFSET`.
+3. The backend caches the most recently completed page before returning it.
+   Retrying the same sequence therefore returns identical rows without
+   advancing DataFusion twice.
+4. `POST /api/sql/:cursor_id/cancel` releases the stream when a query is
+   replaced, its snapshot changes, or its view is closed.
+
+This bounds application-layer work to the current Arrow batch, pending rows,
+and one cached response rather than collecting the complete result. It does not
+change SQL operator semantics: `ORDER BY`, joins, and aggregations may still
+need DataFusion to read or materialize substantial intermediate state before
+the first page is available.
+
+#### Cursor failure handling
+
+- A lost HTTP response or transient client-to-server network failure is
+  recoverable: the client retries the same sequence and receives the cached
+  page.
+- A DataFusion, Arrow projection, or row-serialization failure invalidates and
+  removes the cursor. The API returns `422 Unprocessable Entity`, and the UI
+  offers **Rerun query** rather than retrying a terminal stream.
+- An unknown, cancelled, or idle-expired cursor returns `404 Not Found`; rerun
+  the query to create a new cursor.
+- An expired dataset connection returns `410 Gone`; reconnect the dataset
+  before running SQL again.
+- Backend restarts are not resumable because cursor state is currently
+  in-memory.
+
+Cursors are isolated by dataset connection, limited to 256 server-wide, and
+expire after ten idle minutes. Only the latest page is retained for idempotent
+retry because the browser issues one sequential request at a time.
+
+Blob values remain independent: SQL pages contain scalar values, MIME columns,
+and `_rowaddr`, while media bytes are requested only when their result cells
+approach the visible scroll area. If selecting Blob columns explicitly, also
+select `_rowaddr` and the corresponding MIME column.
+
+The browser currently retains fetched scalar rows up to the 10,000-row cap.
+Row virtualization and byte-bounded page caching remain follow-up work for
+large or unusually wide query results.
 
 The same workflow is available through Make:
 
@@ -216,7 +258,9 @@ kubectl port-forward service/lance-inspector 8080:80
 - `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
 - `POST /api/dataset/connect` — open a local/S3 snapshot and return its metadata plus an opaque `connection_id`
 - `GET /api/dataset?connection_id=...` — schema, active manifest, fragments, branches, deletions
-- `POST /api/sql?connection_id=...` — stream read-only SQL results as schema and NDJSON row chunks
+- `POST /api/sql/start?connection_id=...` — execute read-only SQL once and create a cursor
+- `GET /api/sql/:cursor_id/page?connection_id=...&sequence=...` — retrieve an idempotent 100-row page
+- `POST /api/sql/:cursor_id/cancel?connection_id=...` — cancel and release a query cursor
 - `GET /api/files?connection_id=...` — recursive storage hierarchy for local paths or S3
 - `GET /api/transaction?connection_id=...&path=...` — decoded protobuf transaction and operation
 - `GET /api/rows?connection_id=...&offset=0&limit=20` — paginated live-row preview
@@ -227,3 +271,7 @@ kubectl port-forward service/lance-inspector 8080:80
 Connections are isolated per browser tab, bounded on the server, and expire
 after one hour without access. Reconnect the dataset after a `410 Gone`
 response.
+
+SQL cursors expire after ten idle minutes and are also bounded on the server.
+Rerun the query after a cursor-expired response or DataFusion execution failure;
+page retry is reserved for transport failures while the cursor remains valid.

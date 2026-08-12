@@ -11,6 +11,7 @@ arrow-schema = "58.4.0"
 axum = "0.8.9"
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+datafusion-execution = "54.1.0"
 foyer = "0.22.3"
 futures = "0.3.33"
 lance = "9.0.1"
