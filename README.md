@@ -47,7 +47,7 @@ dashboard or dataset editor.
 - Opens any discovered branch version or tag directly and switches snapshots
   from the loaded-dataset header.
 - Provides an **Infra** mode for storage internals and a data-only **User** mode
-  for viewing the rows and multimodal values in the selected snapshot.
+  with streaming, read-only SQL over the selected snapshot.
 - Exposes no mutation endpoints and is designed to run with read-only storage.
 
 ### Multimodal row inspection
@@ -131,17 +131,38 @@ location again or restarting the server.
 
 ### 4. Switch interface modes
 
-The top-right mode control defaults to **Infra**:
+The top-right mode control defaults to **User**:
 
 - **Infra** shows the complete storage inspector: hierarchy, manifests,
-  fragments, transactions, deletion vectors, raw files, and row previews.
+  fragments, transactions, deletion vectors, raw files, row previews, and
+  read-only SQL.
 - **User** removes the storage hierarchy and internal metadata views. It shows
-  only the live rows and multimodal values from the exact branch and version
-  selected in the header.
+  a SQL editor plus the rows and multimodal values returned from the exact
+  branch and version selected in the header.
 
 Switching modes does not change the selected dataset snapshot.
 
-![Data-only User mode with multimodal row values](docs/images/user-mode.png)
+![User mode SQL editor with incrementally streamed results](docs/images/user-mode-sql.png)
+
+### Streaming SQL
+
+Both modes run DataFusion SQL against a read-only table named `dataset`. The
+default query is:
+
+```sql
+SELECT * FROM dataset
+```
+
+Only `SELECT` and `WITH` queries are accepted. Results are returned as NDJSON:
+one schema event followed by row chunks of at most 100 rows. The browser renders
+each chunk as it arrives instead of buffering the full result before display.
+Applying another query or switching snapshots cancels the previous stream.
+
+Blob values are still loaded independently: SQL streams scalar values and Blob
+descriptors, while media bytes are requested only when their result cells
+approach the visible scroll area. `SELECT *` includes the internal `_rowaddr`
+needed for media URLs. If selecting Blob columns explicitly, also select
+`_rowaddr` and the corresponding MIME column.
 
 The same workflow is available through Make:
 
@@ -195,6 +216,7 @@ kubectl port-forward service/lance-inspector 8080:80
 - `GET /api/dataset` — schema, active manifest, fragments, branches, deletions
 - `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
 - `POST /api/dataset/connect` — open a local/S3 dataset at a branch, version, or tag
+- `POST /api/sql` — stream read-only SQL results as schema and NDJSON row chunks
 - `GET /api/files` — recursive storage hierarchy for local paths or S3
 - `GET /api/transaction?path=...` — decoded protobuf transaction and operation
 - `GET /api/rows?offset=0&limit=20` — paginated live-row preview

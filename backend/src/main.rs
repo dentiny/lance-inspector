@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         .route("/file", get(api::file_preview))
         .route("/transaction", get(api::transaction))
         .route("/rows", get(api::rows))
+        .route("/sql", post(api::sql))
         .route("/media/{column}/{row_address}", get(api::media))
         .with_state(state);
 
