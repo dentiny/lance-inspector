@@ -232,4 +232,5 @@ after one hour without access. Reconnect the dataset after a `410 Gone`
 response.
 
 SQL cursors expire after ten idle minutes and are also bounded on the server.
-Rerun the query after a cursor-expired response.
+Rerun the query after a cursor-expired response or DataFusion execution failure;
+page retry is reserved for transport failures while the cursor remains valid.

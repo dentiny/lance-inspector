@@ -121,6 +121,9 @@ struct UnknownQueryCursor(Uuid);
 #[derive(Debug)]
 struct InvalidRequest(String);
 
+#[derive(Debug)]
+struct QueryExecutionFailed(String);
+
 impl std::fmt::Display for UnknownConnection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -153,12 +156,26 @@ impl std::fmt::Display for InvalidRequest {
 
 impl std::error::Error for InvalidRequest {}
 
+impl std::fmt::Display for QueryExecutionFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "SQL execution failed; rerun the query: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for QueryExecutionFailed {}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
             StatusCode::GONE
         } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
             StatusCode::NOT_FOUND
+        } else if self.0.downcast_ref::<QueryExecutionFailed>().is_some() {
+            StatusCode::UNPROCESSABLE_ENTITY
         } else if self.0.downcast_ref::<InvalidRequest>().is_some() {
             StatusCode::BAD_REQUEST
         } else {
@@ -952,11 +969,30 @@ async fn read_sql_page(
         let scalar_indices = cursor.scalar_indices.clone();
         match cursor.stream.next().await {
             Some(Ok(batch)) => {
-                cursor
-                    .pending_rows
-                    .extend(serialize_rows(&batch.project(&scalar_indices)?)?);
+                let rows = batch
+                    .project(&scalar_indices)
+                    .map_err(|error| QueryExecutionFailed(error.to_string()))
+                    .and_then(|batch| {
+                        serialize_rows(&batch)
+                            .map_err(|error| QueryExecutionFailed(error.to_string()))
+                    });
+                match rows {
+                    Ok(rows) => cursor.pending_rows.extend(rows),
+                    Err(error) => {
+                        cursor.done = true;
+                        drop(cursor);
+                        state.queries.remove(&cursor_id);
+                        return Err(error.into());
+                    }
+                }
             }
-            Some(Err(error)) => return Err(error.into()),
+            Some(Err(error)) => {
+                let error = QueryExecutionFailed(error.to_string());
+                cursor.done = true;
+                drop(cursor);
+                state.queries.remove(&cursor_id);
+                return Err(error.into());
+            }
             None => cursor.done = true,
         }
     }

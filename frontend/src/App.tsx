@@ -145,13 +145,23 @@ const connectedUrl = (path: string, connectionId: string) => {
   return `${path}${separator}connection_id=${encodeURIComponent(connectionId)}`
 }
 
+class HttpError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'HttpError'
+    this.status = status
+  }
+}
+
 async function requireOk(response: Response) {
   if (response.ok) return response
   const body = await response.json().catch(() => ({ error: response.statusText }))
   if (response.status === 410) {
     window.dispatchEvent(new Event('lance-connection-expired'))
   }
-  throw new Error(body.error ?? response.statusText)
+  throw new HttpError(body.error ?? response.statusText, response.status)
 }
 
 const formatBytes = (bytes: number | null) => {
@@ -592,8 +602,10 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
   const [truncated, setTruncated] = useState(false)
   const [hasMore, setHasMore] = useState(true)
   const [retryRequired, setRetryRequired] = useState(false)
+  const [rerunRequired, setRerunRequired] = useState(false)
   const request = useRef<AbortController | undefined>(undefined)
   const cursor = useRef<string | undefined>(undefined)
+  const appliedSql = useRef(DEFAULT_SQL)
   const nextSequence = useRef(0)
   const generation = useRef(0)
   const loading = useRef(false)
@@ -621,10 +633,13 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
       setHasMore(!page.done)
       setTruncated(page.truncated)
       setRetryRequired(false)
+      setRerunRequired(false)
     } catch (reason) {
       if (!controller.signal.aborted && run === generation.current) {
+        const rerun = reason instanceof HttpError && (reason.status === 404 || reason.status === 422)
         setError(reason instanceof Error ? reason.message : String(reason))
-        setRetryRequired(true)
+        setRetryRequired(!rerun)
+        setRerunRequired(rerun)
       }
     } finally {
       if (request.current === controller && run === generation.current) {
@@ -637,6 +652,7 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
   const execute = useCallback(async (statement: string) => {
     const run = generation.current + 1
     generation.current = run
+    appliedSql.current = statement
     request.current?.abort()
     cancelSqlCursor(cursor.current, connectionId)
     cursor.current = undefined
@@ -647,6 +663,7 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
     setTruncated(false)
     setHasMore(true)
     setRetryRequired(false)
+    setRerunRequired(false)
     const controller = new AbortController()
     request.current = controller
     loading.current = true
@@ -681,10 +698,10 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
   }, [connectionId, loadPage])
 
   const loadMore = useCallback((retry = false) => {
-    if (!streaming && hasMore && data && cursor.current && (!retryRequired || retry)) {
+    if (!streaming && hasMore && data && cursor.current && !rerunRequired && (!retryRequired || retry)) {
       void loadPage(cursor.current, nextSequence.current, false, generation.current)
     }
-  }, [data, hasMore, loadPage, retryRequired, streaming])
+  }, [data, hasMore, loadPage, rerunRequired, retryRequired, streaming])
 
   useEffect(() => {
     void execute(DEFAULT_SQL)
@@ -758,7 +775,9 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
         {error && (
           <div className="error-state">
             <CircleAlert />{error}
-            {cursor.current && <button onClick={() => loadMore(true)}>Retry page</button>}
+            {rerunRequired
+              ? <button onClick={() => void execute(appliedSql.current)}>Rerun query</button>
+              : cursor.current && <button onClick={() => loadMore(true)}>Retry page</button>}
           </div>
         )}
         {!data && streaming && <div className="loading-state"><RefreshCw className="spin" />Planning SQL query…</div>}
@@ -772,7 +791,7 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
                 {streaming
                   ? <><RefreshCw className="spin" />Loading more rows…</>
                   : hasMore
-                    ? retryRequired ? 'Retry required' : 'Scroll to load more rows'
+                    ? rerunRequired ? 'Rerun query required' : retryRequired ? 'Retry required' : 'Scroll to load more rows'
                     : truncated
                       ? 'Result capped at 10,000 rows'
                       : 'End of results'}
