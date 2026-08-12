@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -108,6 +108,12 @@ type RowsResponse = {
   rows: Record<string, unknown>[]
 }
 
+type TableData = Pick<RowsResponse, 'columns' | 'media_columns' | 'rows'>
+
+type SqlStreamEvent =
+  | { type: 'schema'; columns: string[]; media_columns: RowsResponse['media_columns'] }
+  | { type: 'rows'; rows: Record<string, unknown>[] }
+
 type TransactionInfo = {
   path: string
   read_version: number
@@ -118,7 +124,7 @@ type TransactionInfo = {
   operation: Record<string, unknown>
 }
 
-type Selection = { type: 'overview' } | { type: 'file'; file: FileEntry }
+type Selection = { type: 'overview' } | { type: 'sql' } | { type: 'file'; file: FileEntry }
 
 const formatBytes = (bytes: number | null) => {
   if (bytes == null) return 'unknown'
@@ -424,7 +430,7 @@ function MediaValue({
   } else if (kind === 'image') {
     content = <img className="media-image" src={source} alt={`${column.name} preview`} />
   } else if (kind === 'audio') {
-    content = <audio className="media-audio" src={source} controls preload="none" />
+    content = <audio className="media-audio" src={source} controls preload="metadata" />
   } else if (kind === 'video') {
     content = <video className="media-video" src={source} controls preload="metadata" />
   } else {
@@ -437,6 +443,29 @@ function MediaValue({
       data-media-state={nearViewport ? 'ready' : 'deferred'}
     >
       {content}
+    </div>
+  )
+}
+
+function RowsTable({ data }: { data: TableData }) {
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead><tr>
+          {data.columns.filter((column) => column !== '_rowaddr').map((column) => <th key={column}>{column}</th>)}
+          {data.media_columns.map((column) => <th key={column.name}>{column.name}</th>)}
+        </tr></thead>
+        <tbody>
+          {data.rows.map((row, index) => (
+            <tr key={String(row._rowaddr ?? index)}>
+              {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
+                <td key={column}><ScalarValue value={row[column]} /></td>
+              ))}
+              {data.media_columns.map((column) => <td key={column.name}><MediaValue column={column} row={row} /></td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -467,24 +496,7 @@ function RowsPanel({ refreshKey, title = 'Row preview' }: { refreshKey: string; 
       {!data && !error && <div className="loading-state"><RefreshCw className="spin" />Scanning Lance rows…</div>}
       {data && (
         <>
-          <div className="table-scroll">
-            <table>
-              <thead><tr>
-                {data.columns.filter((column) => column !== '_rowaddr').map((column) => <th key={column}>{column}</th>)}
-                {data.media_columns.map((column) => <th key={column.name}>{column.name}</th>)}
-              </tr></thead>
-              <tbody>
-                {data.rows.map((row, index) => (
-                  <tr key={String(row._rowaddr ?? index)}>
-                    {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
-                      <td key={column}><ScalarValue value={row[column]} /></td>
-                    ))}
-                    {data.media_columns.map((column) => <td key={column.name}><MediaValue column={column} row={row} /></td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <RowsTable data={data} />
           <div className="pagination">
             <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button>
             <span>20 rows per page</span>
@@ -510,21 +522,149 @@ function DataView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
   )
 }
 
-function UserDataView({ info }: { info: DatasetInfo }) {
+const DEFAULT_SQL = 'SELECT * FROM dataset'
+
+async function consumeSqlStream(
+  sql: string,
+  signal: AbortSignal,
+  onEvent: (event: SqlStreamEvent) => void,
+) {
+  const response = await fetch('/api/sql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql }),
+    signal,
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }))
+    throw new Error(body.error ?? response.statusText)
+  }
+  if (!response.body) throw new Error('SQL response does not support streaming')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const consumeLines = (final = false) => {
+    const lines = buffer.split('\n')
+    buffer = final ? '' : (lines.pop() ?? '')
+    for (const line of lines) {
+      if (line.trim()) onEvent(JSON.parse(line) as SqlStreamEvent)
+    }
+    if (final && buffer.trim()) onEvent(JSON.parse(buffer) as SqlStreamEvent)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    consumeLines()
+  }
+  buffer += decoder.decode()
+  consumeLines(true)
+}
+
+function SqlQueryView({ snapshotKey }: { snapshotKey: string }) {
+  const [sql, setSql] = useState(DEFAULT_SQL)
+  const [data, setData] = useState<TableData>()
+  const [error, setError] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const request = useRef<AbortController | undefined>(undefined)
+
+  const execute = useCallback(async (statement: string) => {
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    setData(undefined)
+    setError('')
+    setStreaming(true)
+    try {
+      await consumeSqlStream(statement, controller.signal, (event) => {
+        if (event.type === 'schema') {
+          setData({ columns: event.columns, media_columns: event.media_columns, rows: [] })
+        } else if (event.type === 'rows') {
+          setData((current) => current
+            ? { ...current, rows: [...current.rows, ...event.rows] }
+            : { columns: [], media_columns: [], rows: event.rows })
+        }
+      })
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (request.current === controller) setStreaming(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void execute(DEFAULT_SQL)
+    return () => request.current?.abort()
+  }, [execute, snapshotKey])
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault()
+    const statement = sql.trim()
+    if (statement) void execute(statement)
+  }
+
+  return (
+    <>
+      <section className="panel sql-panel">
+        <div className="panel-title">
+          <div><span className="eyebrow">DataFusion · read only</span><h2>SQL query</h2></div>
+          <code>table: dataset</code>
+        </div>
+        <form onSubmit={submit}>
+          <textarea
+            value={sql}
+            onChange={(event) => setSql(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                event.preventDefault()
+                event.currentTarget.form?.requestSubmit()
+              }
+            }}
+            aria-label="SQL query"
+            spellCheck={false}
+          />
+          <div className="sql-actions">
+            <span>SELECT or WITH · ⌘/Ctrl + Enter</span>
+            <button type="submit" disabled={streaming || !sql.trim()}>
+              {streaming ? <RefreshCw className="spin" size={14} /> : <ArrowRight size={14} />}
+              {streaming ? 'Streaming' : 'Apply'}
+            </button>
+          </div>
+        </form>
+      </section>
+      <section className="panel data-panel sql-results">
+        <div className="panel-title">
+          <div><span className="eyebrow">Incremental result stream</span><h2>Query results</h2></div>
+          {data && <span className="count-badge">{data.rows.length.toLocaleString()} rows{streaming ? ' · streaming' : ''}</span>}
+        </div>
+        {error && <div className="error-state"><CircleAlert />{error}</div>}
+        {!data && streaming && <div className="loading-state"><RefreshCw className="spin" />Planning SQL query…</div>}
+        {data && data.rows.length === 0 && streaming && <div className="loading-state"><RefreshCw className="spin" />Waiting for rows…</div>}
+        {data && data.rows.length > 0 && <RowsTable data={data} />}
+        {data && data.rows.length === 0 && !streaming && <div className="empty-state">Query returned no rows.</div>}
+      </section>
+    </>
+  )
+}
+
+function DatasetQueryView({ info, mode }: { info: DatasetInfo; mode: 'infra' | 'user' }) {
   return (
     <div className="page wide-page user-data-page">
       <div className="page-heading">
         <div>
-          <span className="eyebrow">User mode · selected snapshot</span>
-          <h1>Dataset data</h1>
+          <span className="eyebrow">{mode === 'infra' ? 'Infra mode · read-only SQL' : 'User mode · selected snapshot'}</span>
+          <h1>{mode === 'infra' ? 'Query dataset' : 'Dataset data'}</h1>
           <p>{info.uri}</p>
         </div>
         <span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>
       </div>
-      <RowsPanel
+      <SqlQueryView
         key={`${info.uri}:${info.branch}:${info.version}`}
-        refreshKey={`${info.uri}:${info.branch}:${info.version}`}
-        title="Dataset rows"
+        snapshotKey={`${info.uri}:${info.branch}:${info.version}`}
       />
     </div>
   )
@@ -906,7 +1046,7 @@ function App() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
   const [error, setError] = useState('')
-  const [mode, setMode] = useState<'infra' | 'user'>('infra')
+  const [mode, setMode] = useState<'infra' | 'user'>('user')
   const [showConnector, setShowConnector] = useState(true)
   const [showReference, setShowReference] = useState(false)
   const tree = useMemo(() => buildTree(files), [files])
@@ -980,9 +1120,15 @@ function App() {
       </header>
       {mode === 'infra' && (
         <aside className="sidebar">
-          <button className={`dataset-root ${selection.type === 'overview' ? 'selected' : ''}`} onClick={() => setSelection({ type: 'overview' })}>
-            <Database size={16} /><span>Dataset root</span><small>{info.rows} rows</small>
-          </button>
+          <div className="sidebar-label">Views</div>
+          <nav className="sidebar-views">
+            <button className={`dataset-root ${selection.type === 'overview' ? 'selected' : ''}`} onClick={() => setSelection({ type: 'overview' })}>
+              <Database size={16} /><span>Dataset root</span><small>{info.rows} rows</small>
+            </button>
+            <button className={`dataset-root ${selection.type === 'sql' ? 'selected' : ''}`} onClick={() => setSelection({ type: 'sql' })}>
+              <Search size={16} /><span>SQL query</span><small>read only</small>
+            </button>
+          </nav>
           <div className="sidebar-label">Storage files <span>{files.length}</span></div>
           <nav className="file-tree">
             {tree.map((node) => (
@@ -999,10 +1145,11 @@ function App() {
       )}
       <main className="content">
         {mode === 'user' ? (
-          <UserDataView info={info} />
+          <DatasetQueryView info={info} mode="user" />
         ) : (
           <>
             {selection.type === 'overview' && <Overview info={info} />}
+            {selection.type === 'sql' && <DatasetQueryView info={info} mode="infra" />}
             {selectedFile?.kind === 'manifest' && <ManifestView info={info} file={selectedFile} />}
             {selectedFile?.kind === 'data' && <DataView info={info} file={selectedFile} />}
             {selectedFile?.kind === 'deletion' && <DeletionFileView info={info} file={selectedFile} />}

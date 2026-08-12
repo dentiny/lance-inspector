@@ -1,6 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, io, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
+use arrow_array::RecordBatch;
 use arrow_json::ArrayWriter;
 use arrow_schema::Schema as ArrowSchema;
 use axum::{
@@ -13,7 +14,8 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures::TryStreamExt;
+use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt};
 use lance::{
     Dataset,
     dataset::transaction::{Operation, Transaction},
@@ -31,6 +33,7 @@ use crate::models::{
 
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
 const MAX_ROWS: usize = 100;
+const SQL_STREAM_CHUNK_ROWS: usize = 100;
 const MAX_DELETION_OFFSETS: usize = 2_000;
 const BLOB_EXTENSION: &str = "lance.blob.v2";
 
@@ -50,6 +53,9 @@ pub struct ApiError(anyhow::Error);
 #[derive(Debug)]
 struct NoDataset;
 
+#[derive(Debug)]
+struct InvalidRequest(String);
+
 impl std::fmt::Display for NoDataset {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("no dataset is connected")
@@ -58,10 +64,20 @@ impl std::fmt::Display for NoDataset {
 
 impl std::error::Error for NoDataset {}
 
+impl std::fmt::Display for InvalidRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidRequest {}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = if self.0.downcast_ref::<NoDataset>().is_some() {
             StatusCode::CONFLICT
+        } else if self.0.downcast_ref::<InvalidRequest>().is_some() {
+            StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
@@ -685,6 +701,130 @@ async fn read_rows(connection: &ConnectedDataset, query: RowsQuery) -> Result<Ro
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SqlRequest {
+    sql: String,
+}
+
+pub async fn sql(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SqlRequest>,
+) -> Result<Response<Body>, ApiError> {
+    let connection = connected(&state).await.map_err(ApiError)?;
+    stream_sql(&connection, &request.sql)
+        .await
+        .map_err(ApiError)
+}
+
+async fn stream_sql(connection: &ConnectedDataset, sql: &str) -> Result<Response<Body>> {
+    let sql = read_only_sql(sql)?;
+    let query = connection
+        .dataset
+        .sql(sql)
+        .with_row_addr(true)
+        .build()
+        .await
+        .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?;
+    let record_stream = query.into_stream().await?;
+    let result_schema = record_stream.schema();
+    let dataset_schema = ArrowSchema::from(&connection.dataset.manifest().schema);
+    let scalar_indices: Vec<_> = result_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| (!is_sql_blob_field(field, &dataset_schema)).then_some(index))
+        .collect();
+    let columns: Vec<_> = scalar_indices
+        .iter()
+        .map(|index| result_schema.field(*index).name().clone())
+        .collect();
+    let media_columns: Vec<_> = result_schema
+        .fields()
+        .iter()
+        .filter(|field| is_sql_blob_field(field, &dataset_schema))
+        .map(|field| {
+            let mime_name = format!("{}_mime", field.name());
+            MediaColumn {
+                name: field.name().clone(),
+                mime_column: result_schema
+                    .field_with_name(&mime_name)
+                    .ok()
+                    .map(|_| mime_name),
+            }
+        })
+        .collect();
+    let schema_line = Bytes::from(format!(
+        "{}\n",
+        json!({
+            "type": "schema",
+            "columns": columns,
+            "media_columns": media_columns,
+        })
+    ));
+
+    let row_stream = record_stream.flat_map(move |batch| {
+        let items = match batch {
+            Ok(batch) => sql_batch_lines(&batch, &scalar_indices),
+            Err(error) => vec![Err(io::Error::other(error))],
+        };
+        futures::stream::iter(items)
+    });
+    let body_stream =
+        futures::stream::once(async move { Ok::<Bytes, io::Error>(schema_line) }).chain(row_stream);
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .header("cache-control", "no-store")
+        .body(Body::from_stream(body_stream))?)
+}
+
+fn read_only_sql(sql: &str) -> Result<&str> {
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    if sql.is_empty() {
+        return Err(anyhow!(InvalidRequest(
+            "SQL query cannot be empty".to_string()
+        )));
+    }
+    let first_keyword = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(first_keyword.as_str(), "select" | "with") {
+        return Err(anyhow!(InvalidRequest(
+            "only read-only SELECT or WITH queries are supported".to_string()
+        )));
+    }
+    Ok(sql)
+}
+
+fn sql_batch_lines(batch: &RecordBatch, scalar_indices: &[usize]) -> Vec<Result<Bytes, io::Error>> {
+    batch
+        .project(scalar_indices)
+        .map_err(io::Error::other)
+        .map(|batch| {
+            (0..batch.num_rows())
+                .step_by(SQL_STREAM_CHUNK_ROWS)
+                .map(|offset| {
+                    let length = SQL_STREAM_CHUNK_ROWS.min(batch.num_rows() - offset);
+                    serialize_rows(&batch.slice(offset, length)).map(|rows| {
+                        Bytes::from(format!("{}\n", json!({"type": "rows", "rows": rows})))
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_else(|error| vec![Err(error)])
+}
+
+fn serialize_rows(batch: &RecordBatch) -> Result<Vec<Value>, io::Error> {
+    let mut output = Vec::new();
+    {
+        let mut writer = ArrayWriter::new(&mut output);
+        writer.write(batch).map_err(io::Error::other)?;
+        writer.finish().map_err(io::Error::other)?;
+    }
+    serde_json::from_slice(&output).map_err(io::Error::other)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MediaQuery {
     mime: Option<String>,
 }
@@ -779,6 +919,13 @@ fn is_blob_field(field: &arrow_schema::Field) -> bool {
         .is_some_and(|name| name == BLOB_EXTENSION)
 }
 
+fn is_sql_blob_field(field: &arrow_schema::Field, dataset_schema: &ArrowSchema) -> bool {
+    is_blob_field(field)
+        || dataset_schema
+            .field_with_name(field.name())
+            .is_ok_and(is_blob_field)
+}
+
 fn classify_file(path: &str) -> &'static str {
     let segments: HashSet<_> = path.split('/').collect();
     if path.ends_with(".manifest") {
@@ -833,5 +980,17 @@ mod tests {
         let open = HeaderValue::from_static("bytes=90-");
         assert_eq!(parse_range(Some(&open), 100).unwrap(), (90, 100, true));
         assert_eq!(parse_range(None, 100).unwrap(), (0, 100, false));
+    }
+
+    #[test]
+    fn accepts_only_read_only_sql() {
+        assert_eq!(
+            read_only_sql(" SELECT * FROM dataset; ").unwrap(),
+            "SELECT * FROM dataset"
+        );
+        assert!(read_only_sql("WITH selected AS (SELECT 1) SELECT * FROM selected").is_ok());
+        assert!(read_only_sql("DELETE FROM dataset").is_err());
+        assert!(read_only_sql("CREATE EXTERNAL TABLE secret").is_err());
+        assert!(read_only_sql("  ").is_err());
     }
 }

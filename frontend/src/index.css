@@ -134,6 +134,8 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .dataset-root svg { color: var(--green); }
 .dataset-root small { color: var(--faint); font: 10px var(--mono); }
 .dataset-root:hover, .dataset-root.selected { background: var(--surface-2); border-color: var(--line); }
+.sidebar-views { display: grid; gap: 4px; padding: 0 10px 8px; }
+.sidebar-views .dataset-root { width: 100%; margin: 0; color: var(--text); }
 .sidebar-label {
   padding: 12px 15px 7px;
   text-transform: uppercase;
@@ -269,6 +271,15 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .empty-inline, .empty-state { color: var(--faint); padding: 25px; font-size: 12px; }
 
 .data-panel { min-height: 300px; }
+.sql-panel { overflow: visible; }
+.sql-panel .panel-title code { color: var(--cyan); font: 9px var(--mono); }
+.sql-panel form { padding: 12px; }
+.sql-panel textarea { width: 100%; min-height: 104px; resize: vertical; display: block; padding: 13px 14px; border: 1px solid #34404d; border-radius: 6px; outline: 0; color: #dce4ed; background: #090d12; font: 11px/1.7 var(--mono); tab-size: 2; }
+.sql-panel textarea:focus { border-color: rgba(117, 211, 166, .6); box-shadow: 0 0 0 3px rgba(117, 211, 166, .07); }
+.sql-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; color: var(--faint); font: 8px var(--mono); }
+.sql-actions button { min-width: 94px; height: 34px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(117, 211, 166, .28); border-radius: 5px; color: #07130e; background: var(--green); cursor: pointer; font: 9px var(--mono); font-weight: 700; }
+.sql-actions button:disabled { opacity: .5; cursor: wait; }
+.sql-results { margin-top: 12px; }
 .table-scroll { overflow: auto; max-height: 630px; }
 table { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: 11px; }
 th { position: sticky; top: 0; z-index: 2; background: var(--surface-2); color: var(--muted); text-align: left; height: 37px; padding: 0 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); font: 9px var(--mono); letter-spacing: .04em; }
