@@ -11,7 +11,6 @@ use axum::{
 use clap::Parser;
 use tokio::sync::RwLock;
 use tower_http::{
-    cors::CorsLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -58,7 +57,6 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .nest("/api", api)
         .fallback_service(static_files)
-        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
