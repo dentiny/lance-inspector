@@ -115,9 +115,18 @@ type RowsResponse = {
 
 type TableData = Pick<RowsResponse, 'columns' | 'media_columns' | 'rows'>
 
-type SqlStreamEvent =
-  | { type: 'schema'; columns: string[]; media_columns: RowsResponse['media_columns'] }
-  | { type: 'rows'; rows: Record<string, unknown>[] }
+type SqlCursorResponse = {
+  cursor_id: string
+  columns: string[]
+  media_columns: RowsResponse['media_columns']
+}
+
+type SqlPageResponse = {
+  sequence: number
+  rows: Record<string, unknown>[]
+  done: boolean
+  truncated: boolean
+}
 
 type TransactionInfo = {
   path: string
@@ -471,7 +480,15 @@ function MediaValue({
   )
 }
 
-function RowsTable({ data, connectionId }: { data: TableData; connectionId: string }) {
+function RowsTable({
+  data,
+  connectionId,
+  footer,
+}: {
+  data: TableData
+  connectionId: string
+  footer?: React.ReactNode
+}) {
   return (
     <div className="table-scroll">
       <table>
@@ -492,6 +509,7 @@ function RowsTable({ data, connectionId }: { data: TableData; connectionId: stri
           ))}
         </tbody>
       </table>
+      {footer}
     </div>
   )
 }
@@ -557,42 +575,13 @@ function DataView({ info, file, connectionId }: { info: DatasetInfo; file: FileE
 }
 
 const DEFAULT_SQL = 'SELECT * FROM dataset'
+const MAX_SQL_RESULT_ROWS = 10_000
 
-async function consumeSqlStream(
-  sql: string,
-  connectionId: string,
-  signal: AbortSignal,
-  onEvent: (event: SqlStreamEvent) => void,
-) {
-  const response = await fetch(connectedUrl('/api/sql', connectionId), {
+const cancelSqlCursor = (cursorId: string | undefined, connectionId: string) => {
+  if (!cursorId) return
+  void fetch(connectedUrl(`/api/sql/${encodeURIComponent(cursorId)}/cancel`, connectionId), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql }),
-    signal,
-  })
-  await requireOk(response)
-  if (!response.body) throw new Error('SQL response does not support streaming')
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  const consumeLines = (final = false) => {
-    const lines = buffer.split('\n')
-    buffer = final ? '' : (lines.pop() ?? '')
-    for (const line of lines) {
-      if (line.trim()) onEvent(JSON.parse(line) as SqlStreamEvent)
-    }
-    if (final && buffer.trim()) onEvent(JSON.parse(buffer) as SqlStreamEvent)
-  }
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    consumeLines()
-  }
-  buffer += decoder.decode()
-  consumeLines(true)
+  }).catch(() => undefined)
 }
 
 function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; connectionId: string }) {
@@ -600,38 +589,125 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
   const [data, setData] = useState<TableData>()
   const [error, setError] = useState('')
   const [streaming, setStreaming] = useState(false)
+  const [truncated, setTruncated] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
+  const [retryRequired, setRetryRequired] = useState(false)
   const request = useRef<AbortController | undefined>(undefined)
+  const cursor = useRef<string | undefined>(undefined)
+  const nextSequence = useRef(0)
+  const generation = useRef(0)
+  const loading = useRef(false)
+  const loadMoreSentinel = useRef<HTMLDivElement>(null)
 
-  const execute = useCallback(async (statement: string) => {
-    request.current?.abort()
+  const loadPage = useCallback(async (cursorId: string, sequence: number, replace: boolean, run: number) => {
+    if (loading.current || run !== generation.current) return
+    loading.current = true
     const controller = new AbortController()
     request.current = controller
-    setData(undefined)
     setError('')
     setStreaming(true)
     try {
-      await consumeSqlStream(statement, connectionId, controller.signal, (event) => {
-        if (event.type === 'schema') {
-          setData({ columns: event.columns, media_columns: event.media_columns, rows: [] })
-        } else if (event.type === 'rows') {
-          setData((current) => current
-            ? { ...current, rows: [...current.rows, ...event.rows] }
-            : { columns: [], media_columns: [], rows: event.rows })
-        }
-      })
+      const response = await fetch(connectedUrl(
+        `/api/sql/${encodeURIComponent(cursorId)}/page?sequence=${sequence}`,
+        connectionId,
+      ), { signal: controller.signal })
+      await requireOk(response)
+      const page = await response.json() as SqlPageResponse
+      if (run !== generation.current || cursor.current !== cursorId) return
+      setData((current) => replace || !current
+        ? { ...(current ?? { columns: [], media_columns: [] }), rows: page.rows }
+        : { ...current, rows: [...current.rows, ...page.rows] })
+      nextSequence.current = page.sequence + 1
+      setHasMore(!page.done)
+      setTruncated(page.truncated)
+      setRetryRequired(false)
     } catch (reason) {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && run === generation.current) {
         setError(reason instanceof Error ? reason.message : String(reason))
+        setRetryRequired(true)
       }
     } finally {
-      if (request.current === controller) setStreaming(false)
+      if (request.current === controller && run === generation.current) {
+        loading.current = false
+        setStreaming(false)
+      }
     }
   }, [connectionId])
 
+  const execute = useCallback(async (statement: string) => {
+    const run = generation.current + 1
+    generation.current = run
+    request.current?.abort()
+    cancelSqlCursor(cursor.current, connectionId)
+    cursor.current = undefined
+    loading.current = false
+    setData(undefined)
+    setError('')
+    setStreaming(true)
+    setTruncated(false)
+    setHasMore(true)
+    setRetryRequired(false)
+    const controller = new AbortController()
+    request.current = controller
+    loading.current = true
+    try {
+      const response = await fetch(connectedUrl('/api/sql/start', connectionId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: statement }),
+        signal: controller.signal,
+      })
+      await requireOk(response)
+      const started = await response.json() as SqlCursorResponse
+      if (run !== generation.current) {
+        cancelSqlCursor(started.cursor_id, connectionId)
+        return
+      }
+      cursor.current = started.cursor_id
+      nextSequence.current = 0
+      setData({ columns: started.columns, media_columns: started.media_columns, rows: [] })
+      loading.current = false
+      await loadPage(started.cursor_id, 0, true, run)
+    } catch (reason) {
+      if (!controller.signal.aborted && run === generation.current) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (request.current === controller && run === generation.current) {
+        loading.current = false
+        setStreaming(false)
+      }
+    }
+  }, [connectionId, loadPage])
+
+  const loadMore = useCallback((retry = false) => {
+    if (!streaming && hasMore && data && cursor.current && (!retryRequired || retry)) {
+      void loadPage(cursor.current, nextSequence.current, false, generation.current)
+    }
+  }, [data, hasMore, loadPage, retryRequired, streaming])
+
   useEffect(() => {
     void execute(DEFAULT_SQL)
-    return () => request.current?.abort()
-  }, [execute, snapshotKey])
+    return () => {
+      generation.current += 1
+      request.current?.abort()
+      cancelSqlCursor(cursor.current, connectionId)
+    }
+  }, [connectionId, execute, snapshotKey])
+
+  useEffect(() => {
+    const element = loadMoreSentinel.current
+    if (!element || !hasMore) return
+    const root = element.closest('.table-scroll')
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadMore()
+      },
+      { root, rootMargin: '300px 0px', threshold: 0.01 },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [data?.rows.length, hasMore, loadMore])
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault()
@@ -671,13 +747,40 @@ function SqlQueryView({ snapshotKey, connectionId }: { snapshotKey: string; conn
       <section className="panel data-panel sql-results">
         <div className="panel-title">
           <div><span className="eyebrow">Incremental result stream</span><h2>Query results</h2></div>
-          {data && <span className="count-badge">{data.rows.length.toLocaleString()} rows{streaming ? ' · streaming' : ''}</span>}
+          {data && (
+            <span className="count-badge">
+              {data.rows.length.toLocaleString()} rows
+              {streaming ? ' · streaming' : ''}
+              {truncated ? ` · capped at ${MAX_SQL_RESULT_ROWS.toLocaleString()}` : ''}
+            </span>
+          )}
         </div>
-        {error && <div className="error-state"><CircleAlert />{error}</div>}
+        {error && (
+          <div className="error-state">
+            <CircleAlert />{error}
+            {cursor.current && <button onClick={() => loadMore(true)}>Retry page</button>}
+          </div>
+        )}
         {!data && streaming && <div className="loading-state"><RefreshCw className="spin" />Planning SQL query…</div>}
         {data && data.rows.length === 0 && streaming && <div className="loading-state"><RefreshCw className="spin" />Waiting for rows…</div>}
-        {data && data.rows.length > 0 && <RowsTable data={data} connectionId={connectionId} />}
-        {data && data.rows.length === 0 && !streaming && <div className="empty-state">Query returned no rows.</div>}
+        {data && data.rows.length > 0 && (
+          <RowsTable
+            data={data}
+            connectionId={connectionId}
+            footer={(
+              <div ref={loadMoreSentinel} className="loading-state">
+                {streaming
+                  ? <><RefreshCw className="spin" />Loading more rows…</>
+                  : hasMore
+                    ? retryRequired ? 'Retry required' : 'Scroll to load more rows'
+                    : truncated
+                      ? 'Result capped at 10,000 rows'
+                      : 'End of results'}
+              </div>
+            )}
+          />
+        )}
+        {data && data.rows.length === 0 && !streaming && !error && <div className="empty-state">Query returned no rows.</div>}
       </section>
     </>
   )

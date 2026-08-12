@@ -1,6 +1,5 @@
 use std::{
-    collections::HashSet,
-    io,
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -19,7 +18,7 @@ use axum::{
     },
     response::IntoResponse,
 };
-use bytes::Bytes;
+use datafusion_execution::SendableRecordBatchStream;
 use foyer::{Cache, CacheBuilder};
 use futures::{StreamExt, TryStreamExt};
 use lance::{
@@ -29,30 +28,37 @@ use lance::{
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::models::{
     BranchHistory, BranchView, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FileEntry,
     FilePreview, FragmentView, HealthResponse, ManifestView, MediaColumn, ReferenceCatalog,
-    RowsResponse, SchemaField, TagView, TransactionView, VersionView,
+    RowsResponse, SchemaField, SqlCursorResponse, SqlPageResponse, TagView, TransactionView,
+    VersionView,
 };
 
 const FILE_PREVIEW_BYTES: usize = 64 * 1024;
 const MAX_ROWS: usize = 100;
-const SQL_STREAM_CHUNK_ROWS: usize = 100;
+const SQL_PAGE_ROWS: usize = 100;
+const MAX_SQL_RESULT_ROWS: usize = 10_000;
 const MAX_DELETION_OFFSETS: usize = 2_000;
 const MAX_CONNECTIONS: usize = 256;
+const MAX_QUERY_CURSORS: usize = 256;
 const CONNECTION_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
+const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 const BLOB_EXTENSION: &str = "lance.blob.v2";
 
 pub struct AppState {
     connections: Cache<Uuid, SessionEntry>,
+    queries: Cache<Uuid, Arc<AsyncMutex<QueryCursor>>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             connections: CacheBuilder::new(MAX_CONNECTIONS).build(),
+            queries: CacheBuilder::new(MAX_QUERY_CURSORS).build(),
         }
     }
 }
@@ -92,10 +98,25 @@ pub struct ConnectedDataset {
     pub reference: String,
 }
 
+struct QueryCursor {
+    connection_id: Uuid,
+    stream: SendableRecordBatchStream,
+    scalar_indices: Vec<usize>,
+    pending_rows: VecDeque<Value>,
+    next_sequence: u64,
+    rows_returned: usize,
+    last_page: Option<SqlPageResponse>,
+    last_accessed: Instant,
+    done: bool,
+}
+
 pub struct ApiError(anyhow::Error);
 
 #[derive(Debug)]
 struct UnknownConnection(Uuid);
+
+#[derive(Debug)]
+struct UnknownQueryCursor(Uuid);
 
 #[derive(Debug)]
 struct InvalidRequest(String);
@@ -112,6 +133,18 @@ impl std::fmt::Display for UnknownConnection {
 
 impl std::error::Error for UnknownConnection {}
 
+impl std::fmt::Display for UnknownQueryCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "SQL cursor {} was not found or has expired; rerun the query",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownQueryCursor {}
+
 impl std::fmt::Display for InvalidRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
@@ -124,6 +157,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
             StatusCode::GONE
+        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
+            StatusCode::NOT_FOUND
         } else if self.0.downcast_ref::<InvalidRequest>().is_some() {
             StatusCode::BAD_REQUEST
         } else {
@@ -775,18 +810,30 @@ pub struct SqlRequest {
     sql: String,
 }
 
-pub async fn sql(
+#[derive(Debug, Deserialize)]
+pub struct SqlPageQuery {
+    connection_id: Uuid,
+    sequence: u64,
+}
+
+pub async fn start_sql(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConnectionQuery>,
     Json(request): Json<SqlRequest>,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Json<SqlCursorResponse>, ApiError> {
     let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    stream_sql(&connection, &request.sql)
+    create_sql_cursor(&state, query.connection_id, &connection, &request.sql)
         .await
+        .map(Json)
         .map_err(ApiError)
 }
 
-async fn stream_sql(connection: &ConnectedDataset, sql: &str) -> Result<Response<Body>> {
+async fn create_sql_cursor(
+    state: &AppState,
+    connection_id: Uuid,
+    connection: &ConnectedDataset,
+    sql: &str,
+) -> Result<SqlCursorResponse> {
     let sql = read_only_sql(sql)?;
     let query = connection
         .dataset
@@ -823,28 +870,128 @@ async fn stream_sql(connection: &ConnectedDataset, sql: &str) -> Result<Response
             }
         })
         .collect();
-    let schema_line = Bytes::from(format!(
-        "{}\n",
-        json!({
-            "type": "schema",
-            "columns": columns,
-            "media_columns": media_columns,
-        })
-    ));
+    let cursor_id = Uuid::new_v4();
+    state.queries.insert(
+        cursor_id,
+        Arc::new(AsyncMutex::new(QueryCursor {
+            connection_id,
+            stream: record_stream,
+            scalar_indices,
+            pending_rows: VecDeque::new(),
+            next_sequence: 0,
+            rows_returned: 0,
+            last_page: None,
+            last_accessed: Instant::now(),
+            done: false,
+        })),
+    );
+    Ok(SqlCursorResponse {
+        cursor_id,
+        columns,
+        media_columns,
+    })
+}
 
-    let row_stream = record_stream.flat_map(move |batch| {
-        let items = match batch {
-            Ok(batch) => sql_batch_lines(&batch, &scalar_indices),
-            Err(error) => vec![Err(io::Error::other(error))],
-        };
-        futures::stream::iter(items)
-    });
-    let body_stream =
-        futures::stream::once(async move { Ok::<Bytes, io::Error>(schema_line) }).chain(row_stream);
-    Ok(Response::builder()
-        .header(CONTENT_TYPE, "application/x-ndjson")
-        .header("cache-control", "no-store")
-        .body(Body::from_stream(body_stream))?)
+pub async fn sql_page(
+    State(state): State<Arc<AppState>>,
+    Path(cursor_id): Path<Uuid>,
+    Query(query): Query<SqlPageQuery>,
+) -> Result<Json<SqlPageResponse>, ApiError> {
+    connected(&state, query.connection_id).map_err(ApiError)?;
+    read_sql_page(&state, cursor_id, query)
+        .await
+        .map(Json)
+        .map_err(ApiError)
+}
+
+async fn read_sql_page(
+    state: &AppState,
+    cursor_id: Uuid,
+    query: SqlPageQuery,
+) -> Result<SqlPageResponse> {
+    let entry = state
+        .queries
+        .get(&cursor_id)
+        .ok_or(UnknownQueryCursor(cursor_id))?;
+    let cursor_handle = entry.value().clone();
+    drop(entry);
+    let mut cursor = cursor_handle.lock().await;
+    if cursor.connection_id != query.connection_id
+        || cursor.last_accessed.elapsed() >= QUERY_IDLE_TTL
+    {
+        drop(cursor);
+        state.queries.remove(&cursor_id);
+        return Err(UnknownQueryCursor(cursor_id).into());
+    }
+    cursor.last_accessed = Instant::now();
+    if let Some(page) = cursor
+        .last_page
+        .as_ref()
+        .filter(|page| page.sequence == query.sequence)
+    {
+        return Ok(page.clone());
+    }
+    if query.sequence != cursor.next_sequence {
+        return Err(anyhow!(InvalidRequest(format!(
+            "expected SQL page sequence {}, received {}",
+            cursor.next_sequence, query.sequence
+        ))));
+    }
+
+    let remaining = MAX_SQL_RESULT_ROWS.saturating_sub(cursor.rows_returned);
+    let page_size = SQL_PAGE_ROWS.min(remaining);
+    let mut rows = Vec::with_capacity(page_size);
+    while rows.len() < page_size {
+        if let Some(row) = cursor.pending_rows.pop_front() {
+            rows.push(row);
+            continue;
+        }
+        if cursor.done {
+            break;
+        }
+        let scalar_indices = cursor.scalar_indices.clone();
+        match cursor.stream.next().await {
+            Some(Ok(batch)) => {
+                cursor
+                    .pending_rows
+                    .extend(serialize_rows(&batch.project(&scalar_indices)?)?);
+            }
+            Some(Err(error)) => return Err(error.into()),
+            None => cursor.done = true,
+        }
+    }
+
+    cursor.rows_returned += rows.len();
+    let capped = cursor.rows_returned >= MAX_SQL_RESULT_ROWS;
+    let done = capped || (cursor.done && cursor.pending_rows.is_empty());
+    if capped {
+        cursor.done = true;
+    }
+    let page = SqlPageResponse {
+        sequence: query.sequence,
+        rows,
+        done,
+        truncated: capped,
+    };
+    cursor.next_sequence += 1;
+    cursor.last_page = Some(page.clone());
+    Ok(page)
+}
+
+pub async fn cancel_sql(
+    State(state): State<Arc<AppState>>,
+    Path(cursor_id): Path<Uuid>,
+    Query(query): Query<ConnectionQuery>,
+) -> Result<StatusCode, ApiError> {
+    connected(&state, query.connection_id).map_err(ApiError)?;
+    if let Some(entry) = state.queries.get(&cursor_id) {
+        let cursor_handle = entry.value().clone();
+        drop(entry);
+        if cursor_handle.lock().await.connection_id == query.connection_id {
+            state.queries.remove(&cursor_id);
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn read_only_sql(sql: &str) -> Result<&str> {
@@ -867,32 +1014,14 @@ fn read_only_sql(sql: &str) -> Result<&str> {
     Ok(sql)
 }
 
-fn sql_batch_lines(batch: &RecordBatch, scalar_indices: &[usize]) -> Vec<Result<Bytes, io::Error>> {
-    batch
-        .project(scalar_indices)
-        .map_err(io::Error::other)
-        .map(|batch| {
-            (0..batch.num_rows())
-                .step_by(SQL_STREAM_CHUNK_ROWS)
-                .map(|offset| {
-                    let length = SQL_STREAM_CHUNK_ROWS.min(batch.num_rows() - offset);
-                    serialize_rows(&batch.slice(offset, length)).map(|rows| {
-                        Bytes::from(format!("{}\n", json!({"type": "rows", "rows": rows})))
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_else(|error| vec![Err(error)])
-}
-
-fn serialize_rows(batch: &RecordBatch) -> Result<Vec<Value>, io::Error> {
+fn serialize_rows(batch: &RecordBatch) -> Result<Vec<Value>> {
     let mut output = Vec::new();
     {
         let mut writer = ArrayWriter::new(&mut output);
-        writer.write(batch).map_err(io::Error::other)?;
-        writer.finish().map_err(io::Error::other)?;
+        writer.write(batch)?;
+        writer.finish()?;
     }
-    serde_json::from_slice(&output).map_err(io::Error::other)
+    Ok(serde_json::from_slice(&output)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,7 +1157,7 @@ fn validate_relative_path(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::RecordBatchIterator;
+    use arrow_array::{Int32Array, RecordBatchIterator};
     use arrow_schema::{DataType, Field};
 
     #[test]
@@ -1128,5 +1257,89 @@ mod tests {
             )
         );
         assert_eq!(ApiError(error).into_response().status(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn sql_cursor_pages_once_and_retries_idempotently() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from_iter_values(0..205))],
+        )
+        .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let uri = format!("memory://cursor-test-{}", Uuid::new_v4());
+        let dataset = Arc::new(Dataset::write(reader, &uri, None).await.unwrap());
+        let connection = ConnectedDataset {
+            dataset,
+            dataset_uri: uri,
+            reference: "main".to_string(),
+        };
+        let connection_id = Uuid::new_v4();
+        let state = AppState::new();
+        state
+            .connections
+            .insert(connection_id, SessionEntry::new(connection.clone()));
+        let started = create_sql_cursor(
+            &state,
+            connection_id,
+            &connection,
+            "SELECT * FROM dataset ORDER BY value",
+        )
+        .await
+        .unwrap();
+
+        let first = read_sql_page(
+            &state,
+            started.cursor_id,
+            SqlPageQuery {
+                connection_id,
+                sequence: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let retry = read_sql_page(
+            &state,
+            started.cursor_id,
+            SqlPageQuery {
+                connection_id,
+                sequence: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(first.rows.len(), SQL_PAGE_ROWS);
+        assert!(!first.done);
+
+        let second = read_sql_page(
+            &state,
+            started.cursor_id,
+            SqlPageQuery {
+                connection_id,
+                sequence: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let last = read_sql_page(
+            &state,
+            started.cursor_id,
+            SqlPageQuery {
+                connection_id,
+                sequence: 2,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.rows.len(), SQL_PAGE_ROWS);
+        assert_eq!(last.rows.len(), 5);
+        assert!(last.done);
+        assert!(!last.truncated);
     }
 }

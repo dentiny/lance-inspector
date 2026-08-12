@@ -153,10 +153,11 @@ default query is:
 SELECT * FROM dataset
 ```
 
-Only `SELECT` and `WITH` queries are accepted. Results are returned as NDJSON:
-one schema event followed by row chunks of at most 100 rows. The browser renders
-each chunk as it arrives instead of buffering the full result before display.
-Applying another query or switching snapshots cancels the previous stream.
+Only `SELECT` and `WITH` queries are accepted. Each query runs once and creates
+a server-side cursor. The browser pulls 100 rows at a time from that cursor as
+the user scrolls, retaining at most 10,000 rows. Page sequence numbers make
+retries idempotent after a network timeout; applying another query or switching
+snapshots cancels the previous cursor.
 
 Blob values are still loaded independently: SQL streams scalar values and Blob
 descriptors, while media bytes are requested only when their result cells
@@ -216,7 +217,9 @@ kubectl port-forward service/lance-inspector 8080:80
 - `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
 - `POST /api/dataset/connect` — open a local/S3 snapshot and return its metadata plus an opaque `connection_id`
 - `GET /api/dataset?connection_id=...` — schema, active manifest, fragments, branches, deletions
-- `POST /api/sql?connection_id=...` — stream read-only SQL results as schema and NDJSON row chunks
+- `POST /api/sql/start?connection_id=...` — execute read-only SQL once and create a cursor
+- `GET /api/sql/:cursor_id/page?connection_id=...&sequence=...` — retrieve an idempotent 100-row page
+- `POST /api/sql/:cursor_id/cancel?connection_id=...` — cancel and release a query cursor
 - `GET /api/files?connection_id=...` — recursive storage hierarchy for local paths or S3
 - `GET /api/transaction?connection_id=...&path=...` — decoded protobuf transaction and operation
 - `GET /api/rows?connection_id=...&offset=0&limit=20` — paginated live-row preview
@@ -227,3 +230,6 @@ kubectl port-forward service/lance-inspector 8080:80
 Connections are isolated per browser tab, bounded on the server, and expire
 after one hour without access. Reconnect the dataset after a `410 Gone`
 response.
+
+SQL cursors expire after ten idle minutes and are also bounded on the server.
+Rerun the query after a cursor-expired response.

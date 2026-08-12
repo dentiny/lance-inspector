@@ -4242,6 +4242,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "datafusion-execution",
  "foyer",
  "futures",
  "lance",

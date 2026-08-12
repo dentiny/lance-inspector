@@ -165,3 +165,18 @@ pub struct MediaColumn {
     pub name: String,
     pub mime_column: Option<String>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct SqlCursorResponse {
+    pub cursor_id: Uuid,
+    pub columns: Vec<String>,
+    pub media_columns: Vec<MediaColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SqlPageResponse {
+    pub sequence: u64,
+    pub rows: Vec<Value>,
+    pub done: bool,
+    pub truncated: bool,
+}
