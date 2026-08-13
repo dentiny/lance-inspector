@@ -42,6 +42,20 @@ where
             .cloned()
     }
 
+    /// Returns the existing value or atomically inserts a newly created value.
+    pub(crate) fn get_or_insert_with(&self, key: K, create: impl FnOnce() -> V) -> V {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = inner.get(&key) {
+            return value.clone();
+        }
+        let value = create();
+        inner.put(key, value.clone());
+        value
+    }
+
     /// Inserts an entry and marks it as most recently used.
     ///
     /// If `key` already exists, its value is replaced without changing the

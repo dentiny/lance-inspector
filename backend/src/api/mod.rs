@@ -1,3 +1,4 @@
+mod blob;
 mod dataset;
 mod error;
 mod files;

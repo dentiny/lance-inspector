@@ -169,7 +169,7 @@ SELECT * FROM dataset
 ```
 
 Only `SELECT` and `WITH` queries are accepted. Each query runs once and creates
-a server-side cursor. The browser pulls 100 rows at a time from that cursor as
+a server-side cursor. The browser pulls 20 rows at a time from that cursor as
 the user scrolls, retaining at most 10,000 rows. Page sequence numbers make
 retries idempotent after a network timeout; applying another query or switching
 snapshots cancels the previous cursor.
@@ -180,7 +180,7 @@ The query lifecycle is:
    forward-only `RecordBatch` stream, and returns an opaque cursor ID plus the
    result schema.
 2. `GET /api/sql/:cursor_id/page?sequence=N` advances that same stream until it
-   has at most 100 rows. It does not rerun the SQL or use `OFFSET`.
+   has at most 20 rows. It does not rerun the SQL or use `OFFSET`.
 3. The backend caches the most recently completed page before returning it.
    Retrying the same sequence therefore returns identical rows without
    advancing DataFusion twice.
@@ -274,12 +274,12 @@ kubectl port-forward service/lance-inspector 8080:80
 - `POST /api/dataset/connect` — select a snapshot through its `discovery_id`, reusing the opened dataset and returning an opaque `connection_id`
 - `GET /api/dataset?connection_id=...` — schema, active manifest, fragments, branches, deletions
 - `POST /api/sql/start?connection_id=...` — execute read-only SQL once and create a cursor
-- `GET /api/sql/:cursor_id/page?connection_id=...&sequence=...` — retrieve an idempotent 100-row page
+- `GET /api/sql/:cursor_id/page?connection_id=...&sequence=...` — retrieve an idempotent 20-row page
 - `POST /api/sql/:cursor_id/cancel?connection_id=...` — cancel and release a query cursor
 - `GET /api/files?connection_id=...` — recursive storage hierarchy for local paths or S3
 - `GET /api/transaction?connection_id=...&path=...` — decoded protobuf transaction and operation
 - `GET /api/rows?connection_id=...&offset=0&limit=20` — paginated live-row preview
-- `GET /api/media/:column/:row_address?connection_id=...` — range-enabled Blob V2 streaming
+- `GET|HEAD /api/media/:source_field_id/:row_address?connection_id=...[&index=0,1]` — lazy, range-enabled Blob V2 streaming (including nested arrays)
 - `GET /api/file?connection_id=...&path=...` — bounded text/hex preview for internal files
 - `GET /api/health` — health check
 

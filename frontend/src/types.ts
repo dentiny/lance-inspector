@@ -89,8 +89,13 @@ export type RowsResponse = {
   limit: number
   total: number
   columns: string[]
-  media_columns: { name: string; mime_column: string | null }[]
-  rows: Record<string, unknown>[]
+  media_columns: { name: string; source_field_id: number }[]
+  rows: RowView[]
+}
+
+export type RowView = {
+  values: Record<string, unknown>
+  media: Record<string, number[][]>
 }
 
 export type TableData = Pick<RowsResponse, 'columns' | 'media_columns' | 'rows'>
@@ -103,7 +108,7 @@ export type SqlCursorResponse = {
 
 export type SqlPageResponse = {
   sequence: number
-  rows: Record<string, unknown>[]
+  rows: RowView[]
   done: boolean
   truncated: boolean
 }

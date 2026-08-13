@@ -2,84 +2,128 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { connectedUrl } from '../api'
 import type { RowsResponse, TableData } from '../types'
 
-function MediaValue({
-  column,
-  row,
-  connectionId,
+type MediaKind = 'image' | 'audio' | 'video' | 'blob'
+
+const mediaKind = (mime: string): MediaKind => mime.startsWith('image/')
+  ? 'image'
+  : mime.startsWith('audio/')
+    ? 'audio'
+    : mime.startsWith('video/')
+      ? 'video'
+      : 'blob'
+
+function MediaPreview({
+  source,
+  alt,
 }: {
-  column: RowsResponse['media_columns'][number]
-  row: Record<string, unknown>
-  connectionId: string
+  source: string
+  alt: string
 }) {
-  const container = useRef<HTMLDivElement>(null)
-  const [nearViewport, setNearViewport] = useState(false)
-  const rowAddress = row._rowaddr
-  const mime = column.mime_column ? String(row[column.mime_column] ?? '') : ''
-  const kind = mime.startsWith('image/')
-    ? 'image'
-    : mime.startsWith('audio/')
-      ? 'audio'
-      : mime.startsWith('video/')
-        ? 'video'
-        : 'blob'
+  const [kind, setKind] = useState<MediaKind>()
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    const element = container.current
-    if (!element || nearViewport) return
-    if (!('IntersectionObserver' in window)) {
-      setNearViewport(true)
-      return
-    }
-    const scrollContainer = element.closest('.table-scroll')
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setNearViewport(true)
-          observer.disconnect()
-        }
-      },
-      { root: scrollContainer, rootMargin: '160px 240px', threshold: 0.01 },
-    )
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [nearViewport])
+    setKind(undefined)
+    setFailed(false)
+    const controller = new AbortController()
+    fetch(source, {
+      method: 'HEAD',
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`media request failed: ${response.status}`)
+        setKind(mediaKind(response.headers.get('Content-Type') ?? ''))
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFailed(true)
+      })
+    return () => controller.abort()
+  }, [source])
 
-  if (rowAddress == null) return <span>—</span>
-  const source = connectedUrl(
-    `/api/media/${encodeURIComponent(column.name)}/${rowAddress}?mime=${encodeURIComponent(mime)}`,
-    connectionId,
-  )
-  let content
-  if (!nearViewport) {
-    content = <span className="media-lazy-label">Blob</span>
+  let content: ReactNode = <span className="media-loading">Loading</span>
+  if (failed) {
+    content = <span className="media-loading media-error">Failed to load</span>
   } else if (kind === 'image') {
-    content = <img className="media-image" src={source} alt={`${column.name} preview`} />
+    content = <img className="media-image" src={source} alt={alt} />
   } else if (kind === 'audio') {
     content = <audio className="media-audio" src={source} controls preload="metadata" />
   } else if (kind === 'video') {
     content = <video className="media-video" src={source} controls preload="metadata" />
-  } else {
+  } else if (kind === 'blob') {
     content = <a className="blob-link" href={source} target="_blank" rel="noopener noreferrer">open blob</a>
   }
   return (
-    <div
-      ref={container}
-      className={`media-lazy-slot media-lazy-${kind}`}
-      data-media-state={nearViewport ? 'ready' : 'deferred'}
-    >
+    <div className={`media-slot media-slot-${kind ?? 'blob'}`}>
       {content}
     </div>
   )
 }
 
-function ScalarValue({ value }: { value: unknown }) {
-  let content
-  if (value == null) content = <span className="null-value">null</span>
-  else if (typeof value === 'boolean') content = <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
-  else if (typeof value === 'object') content = <code>{JSON.stringify(value)}</code>
-  else content = <span>{String(value)}</span>
+function MediaValue({
+  column,
+  indexPaths,
+  rowAddress,
+  connectionId,
+}: {
+  column: RowsResponse['media_columns'][number]
+  indexPaths: number[][]
+  rowAddress: unknown
+  connectionId: string
+}) {
+  const container = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
 
-  return <div className="scalar-value">{content}</div>
+  useEffect(() => {
+    const element = container.current
+    if (!element || visible) return
+    if (!('IntersectionObserver' in window)) {
+      setVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { root: element.closest('.table-scroll'), rootMargin: '200px' },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [visible])
+
+  if (rowAddress == null || indexPaths.length === 0) return <span>—</span>
+  return (
+    <div ref={container} className="media-array">
+      {!visible
+        ? <div className="media-slot media-slot-blob"><span className="media-loading">Blob</span></div>
+        : indexPaths.map((indexPath) => {
+          const indexQuery = indexPath.length === 0 ? '' : `&index=${indexPath.join(',')}`
+          const source = connectedUrl(
+            `/api/media/${column.source_field_id}/${rowAddress}`,
+            connectionId,
+          ) + indexQuery
+          const itemLabel = indexPath.length === 0
+            ? column.name
+            : `${column.name} ${indexPath.map((index) => index + 1).join('.')}`
+          return (
+            <MediaPreview
+              key={indexPath.join(',')}
+              source={source}
+              alt={`${itemLabel} preview`}
+            />
+          )
+        })}
+    </div>
+  )
+}
+
+function ScalarValue({ value }: { value: unknown }) {
+  if (value == null) return <span className="null-value">null</span>
+  if (typeof value === 'boolean') return <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
+  if (typeof value === 'object') return <code>{JSON.stringify(value)}</code>
+  return <span>{String(value)}</span>
 }
 
 export function RowsTable({
@@ -91,21 +135,29 @@ export function RowsTable({
   connectionId: string
   footer?: ReactNode
 }) {
+  const scalarColumns = data.columns.filter((column) => column !== '_rowaddr')
   return (
     <div className="table-scroll">
       <table>
         <thead><tr>
-          {data.columns.filter((column) => column !== '_rowaddr').map((column) => <th key={column}>{column}</th>)}
+          {scalarColumns.map((column) => <th key={column}>{column}</th>)}
           {data.media_columns.map((column) => <th key={column.name}>{column.name}</th>)}
         </tr></thead>
         <tbody>
           {data.rows.map((row, index) => (
-            <tr key={String(row._rowaddr ?? index)}>
-              {data.columns.filter((column) => column !== '_rowaddr').map((column) => (
-                <td key={column}><ScalarValue value={row[column]} /></td>
+            <tr key={String(row.values._rowaddr ?? index)}>
+              {scalarColumns.map((column) => (
+                <td key={column}><ScalarValue value={row.values[column]} /></td>
               ))}
               {data.media_columns.map((column) => (
-                <td key={column.name}><MediaValue column={column} row={row} connectionId={connectionId} /></td>
+                <td key={column.name}>
+                  <MediaValue
+                    column={column}
+                    indexPaths={row.media[column.name] ?? []}
+                    rowAddress={row.values._rowaddr}
+                    connectionId={connectionId}
+                  />
+                </td>
               ))}
             </tr>
           ))}

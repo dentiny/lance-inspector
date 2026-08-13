@@ -27,12 +27,6 @@ pub(super) struct InvalidRequest(pub(super) String);
 pub(super) struct QueryExecutionFailed(pub(super) String);
 
 #[derive(Debug)]
-pub(super) struct BlobUnavailable {
-    pub(super) column: String,
-    pub(super) row_address: u64,
-}
-
-#[derive(Debug)]
 pub(super) struct RangeNotSatisfiable {
     pub(super) size: u64,
     pub(super) message: String,
@@ -94,18 +88,6 @@ impl std::fmt::Display for QueryExecutionFailed {
 
 impl std::error::Error for QueryExecutionFailed {}
 
-impl std::fmt::Display for BlobUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "blob column '{}' is null or unavailable at row address {}",
-            self.column, self.row_address
-        )
-    }
-}
-
-impl std::error::Error for BlobUnavailable {}
-
 impl std::fmt::Display for RangeNotSatisfiable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -135,9 +117,7 @@ impl IntoResponse for ApiError {
             || self.0.downcast_ref::<UnknownDiscovery>().is_some()
         {
             StatusCode::GONE
-        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some()
-            || self.0.downcast_ref::<BlobUnavailable>().is_some()
-        {
+        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
             StatusCode::NOT_FOUND
         } else if self.0.downcast_ref::<QueryExecutionFailed>().is_some() {
             StatusCode::UNPROCESSABLE_ENTITY
@@ -146,6 +126,26 @@ impl IntoResponse for ApiError {
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
-        (status, Json(json!({ "error": format!("{:#}", self.0) }))).into_response()
+        if status.is_server_error() {
+            eprintln!("request failed: {:#}", self.0);
+        }
+        (
+            status,
+            Json(json!({ "error": client_error_message(&self.0) })),
+        )
+            .into_response()
+    }
+}
+
+/// Formats an error for an API response without repeating every intermediate
+/// error wrapper. The outer context explains the failed operation, while the
+/// root cause contains the actionable detail.
+fn client_error_message(error: &anyhow::Error) -> String {
+    let context = error.to_string();
+    let root_cause = error.root_cause().to_string();
+    if context == root_cause {
+        context
+    } else {
+        format!("{context}: {root_cause}")
     }
 }

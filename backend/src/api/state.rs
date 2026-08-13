@@ -5,19 +5,22 @@ use std::{
 };
 
 use anyhow::Result;
+use arrow_array::ArrayRef;
 use datafusion_execution::SendableRecordBatchStream;
 use lance::Dataset;
 use serde::Deserialize;
-use serde_json::Value;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc};
 use uuid::Uuid;
 
 use crate::{
     cache::BoundedCache,
-    models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse},
+    models::{DatasetInfo, FileEntry, FilesPage, RowView, SqlPageResponse},
 };
 
-use super::error::{UnknownConnection, UnknownDiscovery};
+use super::{
+    error::{UnknownConnection, UnknownDiscovery},
+    schema::MediaProjection,
+};
 
 // Maximum client dataset sessions retained in memory.
 const MAX_CONNECTIONS: usize = 256;
@@ -25,12 +28,18 @@ const MAX_CONNECTIONS: usize = 256;
 const MAX_DISCOVERIES: usize = 256;
 // Maximum active SQL cursors retained in memory.
 const MAX_QUERY_CURSORS: usize = 256;
+// Maximum materialized Blob-array rows retained per connection. This is
+// deliberately small; bounding this cache by bytes is a follow-up.
+const MAX_BLOB_ARRAY_ROWS: usize = 8;
 // Dataset sessions expire after this period without access.
 const CONNECTION_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 // Dataset discoveries expire after this period without access.
 const DISCOVERY_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 // SQL cursors expire after this period without access.
 pub(super) const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+
+type BlobArrayKey = (String, u64);
+type BlobArraySlot = Arc<OnceCell<ArrayRef>>;
 
 pub(crate) struct AppState {
     pub(super) connections: BoundedCache<Uuid, SessionEntry>,
@@ -112,6 +121,24 @@ impl SessionEntry {
 pub(super) struct ConnectedDataset {
     pub(super) dataset: Arc<Dataset>,
     pub(super) info: Arc<DatasetInfo>,
+    blob_arrays: Arc<BoundedCache<BlobArrayKey, BlobArraySlot>>,
+}
+
+impl ConnectedDataset {
+    pub(super) fn new(dataset: Arc<Dataset>, info: Arc<DatasetInfo>) -> Self {
+        Self {
+            dataset,
+            info,
+            blob_arrays: Arc::new(BoundedCache::new(MAX_BLOB_ARRAY_ROWS)),
+        }
+    }
+
+    pub(super) fn blob_array_slot(&self, column: &str, row_address: u64) -> BlobArraySlot {
+        self.blob_arrays
+            .get_or_insert_with((column.to_string(), row_address), || {
+                Arc::new(OnceCell::new())
+            })
+    }
 }
 
 pub(super) struct FileListing {
@@ -126,7 +153,8 @@ pub(super) struct QueryCursor {
     pub(super) connection_id: Uuid,
     pub(super) stream: SendableRecordBatchStream,
     pub(super) scalar_indices: Vec<usize>,
-    pub(super) pending_rows: VecDeque<Value>,
+    pub(super) media_projections: Vec<MediaProjection>,
+    pub(super) pending_rows: VecDeque<RowView>,
     pub(super) next_sequence: u64,
     pub(super) rows_returned: usize,
     pub(super) last_page: Option<SqlPageResponse>,
@@ -211,17 +239,11 @@ mod tests {
         );
         state.connections.insert(
             first_id,
-            SessionEntry::new(ConnectedDataset {
-                dataset: dataset.clone(),
-                info: first_info,
-            }),
+            SessionEntry::new(ConnectedDataset::new(dataset.clone(), first_info)),
         );
         state.connections.insert(
             second_id,
-            SessionEntry::new(ConnectedDataset {
-                dataset,
-                info: second_info,
-            }),
+            SessionEntry::new(ConnectedDataset::new(dataset, second_info)),
         );
 
         assert_eq!(

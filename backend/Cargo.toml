@@ -19,16 +19,19 @@ arrow-json = "58.4.0"
 arrow-schema = "58.4.0"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 datafusion-execution = { version = "54.1.0", default-features = false }
-futures = { version = "0.3.33", default-features = false, features = ["async-await", "std"] }
+datafusion-expr = { version = "54.1.0", default-features = false }
+file-format = { version = "0.29.0", features = ["reader-ebml", "reader-id3v2", "reader-mp4"] }
+futures = { version = "0.3.33", default-features = false, features = ["std"] }
 lance = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620", default-features = false, features = ["aws", "gcp"] }
+lance-core = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620", default-features = false }
 lru = "0.18.2"
 prost = "0.14.4"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
-tikv-jemallocator = "0.7.0"
+tikv-jemallocator = { version = "0.7.0", default-features = false }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync"] }
 # Keep this aligned with reqwest's transitive version to avoid compiling two tower-http releases.
-tower-http = { version = "0.6.11", features = ["fs", "trace"] }
+tower-http = { version = "0.6.11", features = ["fs"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -36,3 +39,7 @@ pprof = { version = "0.15.0", features = ["flamegraph"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemalloc_pprof = { version = "0.9.0", features = ["flamegraph"], optional = true }
+
+[dev-dependencies]
+arrow-buffer = "58.4.0"
+lance-file = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620", default-features = false }
