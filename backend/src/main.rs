@@ -1,4 +1,5 @@
 mod api;
+mod cache;
 mod models;
 #[cfg(all(feature = "profiling", unix))]
 mod profiler;
@@ -11,14 +12,13 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 #[unsafe(export_name = "malloc_conf")]
 pub static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     routing::{get, post},
 };
-use clap::Parser;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -26,24 +26,34 @@ use tower_http::{
 
 use api::AppState;
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "lance-inspector",
-    about = "Read-only web inspector for Lance datasets"
-)]
+const BIND_ENV: &str = "LANCE_INSPECTOR_BIND";
+const UI_DIR_ENV: &str = "LANCE_INSPECTOR_UI_DIR";
+
+#[derive(Debug)]
 struct Args {
     /// Address to listen on.
-    #[arg(long, env = "LANCE_INSPECTOR_BIND", default_value = "0.0.0.0:8080")]
     bind: SocketAddr,
 
     /// Directory containing the built React application.
-    #[arg(long, env = "LANCE_INSPECTOR_UI_DIR", default_value = "frontend/dist")]
     ui_dir: PathBuf,
+}
+
+impl Args {
+    fn from_env() -> Result<Self> {
+        let bind = env::var(BIND_ENV).unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let bind = bind
+            .parse()
+            .with_context(|| format!("{BIND_ENV} must be a valid socket address, got {bind:?}"))?;
+        let ui_dir = env::var_os(UI_DIR_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("frontend/dist"));
+        Ok(Self { bind, ui_dir })
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Args::from_env()?;
     let state = Arc::new(AppState::new());
 
     let api = Router::new()

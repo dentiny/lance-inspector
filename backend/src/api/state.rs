@@ -6,14 +6,16 @@ use std::{
 
 use anyhow::Result;
 use datafusion_execution::SendableRecordBatchStream;
-use foyer::{Cache, CacheBuilder};
 use lance::Dataset;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
-use crate::models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse};
+use crate::{
+    cache::BoundedCache,
+    models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse},
+};
 
 use super::error::{UnknownConnection, UnknownDiscovery};
 
@@ -31,17 +33,17 @@ const DISCOVERY_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 pub(super) const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 
 pub(crate) struct AppState {
-    pub(super) connections: Cache<Uuid, SessionEntry>,
-    pub(super) discoveries: Cache<Uuid, DiscoveryEntry>,
-    pub(super) queries: Cache<Uuid, Arc<AsyncMutex<QueryCursor>>>,
+    pub(super) connections: BoundedCache<Uuid, SessionEntry>,
+    pub(super) discoveries: BoundedCache<Uuid, DiscoveryEntry>,
+    pub(super) queries: BoundedCache<Uuid, Arc<AsyncMutex<QueryCursor>>>,
 }
 
 impl AppState {
     pub(crate) fn new() -> Self {
         Self {
-            connections: CacheBuilder::new(MAX_CONNECTIONS).build(),
-            discoveries: CacheBuilder::new(MAX_DISCOVERIES).build(),
-            queries: CacheBuilder::new(MAX_QUERY_CURSORS).build(),
+            connections: BoundedCache::new(MAX_CONNECTIONS),
+            discoveries: BoundedCache::new(MAX_DISCOVERIES),
+            queries: BoundedCache::new(MAX_QUERY_CURSORS),
         }
     }
 }
@@ -146,9 +148,7 @@ pub(super) fn discovered(state: &AppState, discovery_id: Uuid) -> Result<(Arc<Da
         .discoveries
         .get(&discovery_id)
         .ok_or(UnknownDiscovery(discovery_id))?;
-    let discovery = entry.value().clone();
-    drop(entry);
-    if let Some(dataset) = discovery.access() {
+    if let Some(dataset) = entry.access() {
         return Ok(dataset);
     }
     state.discoveries.remove(&discovery_id);
@@ -163,8 +163,7 @@ pub(super) fn connected_session(
         .connections
         .get(&connection_id)
         .ok_or(UnknownConnection(connection_id))?;
-    let session = entry.value().clone();
-    drop(entry);
+    let session = entry;
     if let Some(connection) = session.access() {
         return Ok((session, connection));
     }
