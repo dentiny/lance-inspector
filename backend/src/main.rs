@@ -1,9 +1,15 @@
 mod api;
 mod models;
+#[cfg(all(feature = "profiling", unix))]
+mod profiler;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[unsafe(export_name = "malloc_conf")]
+pub static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -61,6 +67,8 @@ async fn main() -> Result<()> {
         .nest("/api", api)
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http());
+    #[cfg(all(feature = "profiling", unix))]
+    let app = app.merge(profiler::routes());
 
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     println!(

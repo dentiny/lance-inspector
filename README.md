@@ -99,6 +99,20 @@ Open [http://localhost:8080](http://localhost:8080), enter a local path such as
 then visualizes the dataset's branches, versions, fork points, and tags so you
 can choose a snapshot without knowing its reference name in advance.
 
+### CPU and memory profiling
+
+Profiling support is enabled by default. Request a CPU flamegraph with:
+
+```bash
+curl -o cpu-flamegraph.svg \
+  "http://localhost:8080/debug/pprof/cpu/flamegraph?seconds=10"
+```
+
+The endpoint samples the entire process during that interval, so issue the
+dataset request you want to investigate concurrently. On Linux, a snapshot of
+live jemalloc allocations is available at
+`/debug/pprof/heap/flamegraph`. Both endpoints return an SVG flamegraph.
+
 ## Web workflow
 
 ### 1. Open a dataset
