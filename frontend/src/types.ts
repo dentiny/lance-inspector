@@ -48,6 +48,7 @@ export type ConnectedDataset = {
 }
 
 export type ReferenceCatalog = {
+  discovery_id: string
   uri: string
   branches: {
     name: string

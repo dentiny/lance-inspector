@@ -86,6 +86,7 @@ pub struct DeletionView {
 
 #[derive(Debug, Serialize)]
 pub struct ReferenceCatalog {
+    pub discovery_id: Uuid,
     pub uri: String,
     pub branches: Vec<BranchHistory>,
     pub tags: Vec<TagView>,

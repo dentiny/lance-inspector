@@ -255,8 +255,8 @@ kubectl port-forward service/lance-inspector 8080:80
 
 ## API
 
-- `POST /api/dataset/references` — discover branches, versions, and tags for a dataset
-- `POST /api/dataset/connect` — open a local/S3 snapshot and return its metadata plus an opaque `connection_id`
+- `POST /api/dataset/references` — discover branches, versions, and tags, returning an opaque `discovery_id`
+- `POST /api/dataset/connect` — select a snapshot through its `discovery_id`, reusing the opened dataset and returning an opaque `connection_id`
 - `GET /api/dataset?connection_id=...` — schema, active manifest, fragments, branches, deletions
 - `POST /api/sql/start?connection_id=...` — execute read-only SQL once and create a cursor
 - `GET /api/sql/:cursor_id/page?connection_id=...&sequence=...` — retrieve an idempotent 100-row page

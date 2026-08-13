@@ -15,19 +15,24 @@ use uuid::Uuid;
 
 use crate::models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse};
 
-use super::error::UnknownConnection;
+use super::error::{UnknownConnection, UnknownDiscovery};
 
 // Maximum client dataset sessions retained in memory.
 const MAX_CONNECTIONS: usize = 256;
+// Maximum discovered dataset roots retained while clients choose snapshots.
+const MAX_DISCOVERIES: usize = 256;
 // Maximum active SQL cursors retained in memory.
 const MAX_QUERY_CURSORS: usize = 256;
 // Dataset sessions expire after this period without access.
 const CONNECTION_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
+// Dataset discoveries expire after this period without access.
+const DISCOVERY_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 // SQL cursors expire after this period without access.
 pub(super) const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 
 pub(crate) struct AppState {
     pub(super) connections: Cache<Uuid, SessionEntry>,
+    pub(super) discoveries: Cache<Uuid, DiscoveryEntry>,
     pub(super) queries: Cache<Uuid, Arc<AsyncMutex<QueryCursor>>>,
 }
 
@@ -35,8 +40,39 @@ impl AppState {
     pub(crate) fn new() -> Self {
         Self {
             connections: CacheBuilder::new(MAX_CONNECTIONS).build(),
+            discoveries: CacheBuilder::new(MAX_DISCOVERIES).build(),
             queries: CacheBuilder::new(MAX_QUERY_CURSORS).build(),
         }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct DiscoveryEntry {
+    dataset: Arc<Dataset>,
+    uri: String,
+    last_accessed: Arc<Mutex<Instant>>,
+}
+
+impl DiscoveryEntry {
+    pub(super) fn new(dataset: Arc<Dataset>, uri: String) -> Self {
+        Self {
+            dataset,
+            uri,
+            last_accessed: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+
+    fn access(&self) -> Option<(Arc<Dataset>, String)> {
+        let now = Instant::now();
+        let mut last_accessed = self
+            .last_accessed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if now.duration_since(*last_accessed) >= DISCOVERY_IDLE_TTL {
+            return None;
+        }
+        *last_accessed = now;
+        Some((self.dataset.clone(), self.uri.clone()))
     }
 }
 
@@ -103,6 +139,20 @@ pub(crate) struct ConnectionQuery {
 
 pub(super) fn connected(state: &AppState, connection_id: Uuid) -> Result<ConnectedDataset> {
     connected_session(state, connection_id).map(|(_, connection)| connection)
+}
+
+pub(super) fn discovered(state: &AppState, discovery_id: Uuid) -> Result<(Arc<Dataset>, String)> {
+    let entry = state
+        .discoveries
+        .get(&discovery_id)
+        .ok_or(UnknownDiscovery(discovery_id))?;
+    let discovery = entry.value().clone();
+    drop(entry);
+    if let Some(dataset) = discovery.access() {
+        return Ok(dataset);
+    }
+    state.discoveries.remove(&discovery_id);
+    Err(UnknownDiscovery(discovery_id).into())
 }
 
 pub(super) fn connected_session(

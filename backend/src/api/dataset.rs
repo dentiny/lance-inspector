@@ -18,7 +18,10 @@ use crate::models::{
 use super::{
     error::ApiError,
     schema::is_blob_field,
-    state::{AppState, ConnectedDataset, ConnectionQuery, SessionEntry, connected},
+    state::{
+        AppState, ConnectedDataset, ConnectionQuery, DiscoveryEntry, SessionEntry, connected,
+        discovered,
+    },
 };
 
 // Maximum number of deleted row offsets included in the UI preview.
@@ -34,7 +37,7 @@ pub(crate) async fn dataset_info(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConnectRequest {
-    uri: String,
+    discovery_id: Uuid,
     reference: Option<String>,
 }
 
@@ -44,19 +47,22 @@ pub(crate) struct DiscoverRequest {
 }
 
 pub(crate) async fn discover_dataset(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DiscoverRequest>,
 ) -> Result<Json<ReferenceCatalog>, ApiError> {
-    discover(request).await.map(Json).map_err(ApiError)
+    discover(&state, request).await.map(Json).map_err(ApiError)
 }
 
-async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
+async fn discover(state: &AppState, request: DiscoverRequest) -> Result<ReferenceCatalog> {
     let uri = request.uri.trim();
     if uri.is_empty() {
         bail!("dataset location cannot be empty");
     }
-    let root = Dataset::open(uri)
-        .await
-        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
+    let root = Arc::new(
+        Dataset::open(uri)
+            .await
+            .with_context(|| format!("failed to open Lance dataset {uri}"))?,
+    );
     let branch_contents = root.list_branches().await?;
     let tag_contents = root.tags().list().await?;
 
@@ -77,7 +83,7 @@ async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
     let mut branches = Vec::with_capacity(branch_names.len());
     for name in branch_names {
         let dataset = if name == "main" {
-            root.clone()
+            root.as_ref().clone()
         } else {
             root.checkout_branch(&name).await?
         };
@@ -108,7 +114,12 @@ async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
         });
     }
 
+    let discovery_id = Uuid::new_v4();
+    state
+        .discoveries
+        .insert(discovery_id, DiscoveryEntry::new(root, uri.to_string()));
     Ok(ReferenceCatalog {
+        discovery_id,
         uri: uri.to_string(),
         branches,
         tags,
@@ -123,21 +134,15 @@ pub(crate) async fn connect_dataset(
 }
 
 async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectResponse> {
-    let uri = request.uri.trim();
-    if uri.is_empty() {
-        bail!("dataset location cannot be empty");
-    }
+    let (root, uri) = discovered(state, request.discovery_id)?;
     let reference = request.reference.as_deref().unwrap_or("main").trim();
     let reference = if reference.is_empty() {
         "main"
     } else {
         reference
     };
-    let root = Dataset::open(uri)
-        .await
-        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
-    let dataset = Arc::new(resolve_reference(root, reference).await?);
-    let dataset_info = Arc::new(build_dataset_info(&dataset, uri, reference).await?);
+    let dataset = resolve_reference(root, reference).await?;
+    let dataset_info = Arc::new(build_dataset_info(&dataset, &uri, reference).await?);
     let connection = ConnectedDataset {
         dataset,
         info: dataset_info.clone(),
@@ -152,7 +157,7 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectRes
     })
 }
 
-async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
+async fn resolve_reference(root: Arc<Dataset>, reference: &str) -> Result<Arc<Dataset>> {
     if reference.eq_ignore_ascii_case("main") {
         return Ok(root);
     }
@@ -160,6 +165,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(version)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out version {version}"));
     }
     if let Some(version) = reference.strip_prefix("version:") {
@@ -169,18 +175,21 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(version)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out version {version}"));
     }
     if let Some(branch) = reference.strip_prefix("branch:") {
         return root
             .checkout_branch(branch)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out branch {branch}"));
     }
     if let Some(tag) = reference.strip_prefix("tag:") {
         return root
             .checkout_version(tag)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out tag {tag}"));
     }
     if let Some((branch, version)) = reference.rsplit_once(':')
@@ -189,6 +198,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version((branch, version))
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out {branch} version {version}"));
     }
 
@@ -197,6 +207,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_branch(reference)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out branch {reference}"));
     }
     let tags = root.tags().list().await?;
@@ -204,6 +215,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(reference)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out tag {reference}"));
     }
     bail!(
@@ -354,4 +366,47 @@ pub(super) async fn build_dataset_info(
         },
         fragments,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::{Int32Array, RecordBatch, RecordBatchIterator};
+    use arrow_schema::{DataType, Field, Schema as TestArrowSchema};
+
+    use super::*;
+    use crate::api::state::{AppState, connected, discovered};
+
+    #[tokio::test]
+    async fn connect_reuses_the_discovered_dataset_root() {
+        let schema = Arc::new(TestArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+            .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let path =
+            std::env::temp_dir().join(format!("lance-inspector-discovery-{}", Uuid::new_v4()));
+        let uri = path.to_string_lossy().into_owned();
+        Dataset::write(reader, &uri, None).await.unwrap();
+
+        let state = AppState::new();
+        let catalog = discover(&state, DiscoverRequest { uri }).await.unwrap();
+        let (discovered_root, _) = discovered(&state, catalog.discovery_id).unwrap();
+
+        let response = connect(
+            &state,
+            ConnectRequest {
+                discovery_id: catalog.discovery_id,
+                reference: Some("main".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let connection = connected(&state, response.connection_id).unwrap();
+
+        assert!(Arc::ptr_eq(&discovered_root, &connection.dataset));
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }
