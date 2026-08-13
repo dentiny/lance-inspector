@@ -11,14 +11,17 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::models::{
-    BranchHistory, BranchView, ConnectResponse, DataFileView, DatasetInfo, DeletionView,
-    FragmentView, ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
+    BranchHistory, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FragmentView,
+    ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
 };
 
 use super::{
     error::ApiError,
     schema::is_blob_field,
-    state::{AppState, ConnectedDataset, ConnectionQuery, SessionEntry, connected},
+    state::{
+        AppState, ConnectedDataset, ConnectionQuery, DiscoveryEntry, SessionEntry, connected,
+        discovered,
+    },
 };
 
 // Maximum number of deleted row offsets included in the UI preview.
@@ -27,17 +30,14 @@ const MAX_DELETION_OFFSETS: usize = 2_000;
 pub(crate) async fn dataset_info(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConnectionQuery>,
-) -> Result<Json<DatasetInfo>, ApiError> {
+) -> Result<Json<Arc<DatasetInfo>>, ApiError> {
     let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    build_dataset_info(&connection)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    Ok(Json(connection.info))
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConnectRequest {
-    uri: String,
+    discovery_id: Uuid,
     reference: Option<String>,
 }
 
@@ -47,19 +47,22 @@ pub(crate) struct DiscoverRequest {
 }
 
 pub(crate) async fn discover_dataset(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DiscoverRequest>,
 ) -> Result<Json<ReferenceCatalog>, ApiError> {
-    discover(request).await.map(Json).map_err(ApiError)
+    discover(&state, request).await.map(Json).map_err(ApiError)
 }
 
-async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
+async fn discover(state: &AppState, request: DiscoverRequest) -> Result<ReferenceCatalog> {
     let uri = request.uri.trim();
     if uri.is_empty() {
         bail!("dataset location cannot be empty");
     }
-    let root = Dataset::open(uri)
-        .await
-        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
+    let root = Arc::new(
+        Dataset::open(uri)
+            .await
+            .with_context(|| format!("failed to open Lance dataset {uri}"))?,
+    );
     let branch_contents = root.list_branches().await?;
     let tag_contents = root.tags().list().await?;
 
@@ -80,7 +83,7 @@ async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
     let mut branches = Vec::with_capacity(branch_names.len());
     for name in branch_names {
         let dataset = if name == "main" {
-            root.clone()
+            root.as_ref().clone()
         } else {
             root.checkout_branch(&name).await?
         };
@@ -111,7 +114,12 @@ async fn discover(request: DiscoverRequest) -> Result<ReferenceCatalog> {
         });
     }
 
+    let discovery_id = Uuid::new_v4();
+    state
+        .discoveries
+        .insert(discovery_id, DiscoveryEntry::new(root, uri.to_string()));
     Ok(ReferenceCatalog {
+        discovery_id,
         uri: uri.to_string(),
         branches,
         tags,
@@ -126,37 +134,30 @@ pub(crate) async fn connect_dataset(
 }
 
 async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectResponse> {
-    let uri = request.uri.trim();
-    if uri.is_empty() {
-        bail!("dataset location cannot be empty");
-    }
+    let (root, uri) = discovered(state, request.discovery_id)?;
     let reference = request.reference.as_deref().unwrap_or("main").trim();
     let reference = if reference.is_empty() {
         "main"
     } else {
         reference
     };
-    let root = Dataset::open(uri)
-        .await
-        .with_context(|| format!("failed to open Lance dataset {uri}"))?;
-    let dataset = Arc::new(resolve_reference(root, reference).await?);
+    let dataset = resolve_reference(root, reference).await?;
+    let dataset_info = Arc::new(build_dataset_info(&dataset, &uri, reference).await?);
     let connection = ConnectedDataset {
         dataset,
-        dataset_uri: uri.to_string(),
-        reference: reference.to_string(),
+        info: dataset_info.clone(),
     };
-    let dataset = build_dataset_info(&connection).await?;
     let connection_id = Uuid::new_v4();
     state
         .connections
         .insert(connection_id, SessionEntry::new(connection));
     Ok(ConnectResponse {
         connection_id,
-        dataset,
+        dataset: dataset_info,
     })
 }
 
-async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
+async fn resolve_reference(root: Arc<Dataset>, reference: &str) -> Result<Arc<Dataset>> {
     if reference.eq_ignore_ascii_case("main") {
         return Ok(root);
     }
@@ -164,6 +165,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(version)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out version {version}"));
     }
     if let Some(version) = reference.strip_prefix("version:") {
@@ -173,18 +175,21 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(version)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out version {version}"));
     }
     if let Some(branch) = reference.strip_prefix("branch:") {
         return root
             .checkout_branch(branch)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out branch {branch}"));
     }
     if let Some(tag) = reference.strip_prefix("tag:") {
         return root
             .checkout_version(tag)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out tag {tag}"));
     }
     if let Some((branch, version)) = reference.rsplit_once(':')
@@ -193,6 +198,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version((branch, version))
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out {branch} version {version}"));
     }
 
@@ -201,6 +207,7 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_branch(reference)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out branch {reference}"));
     }
     let tags = root.tags().list().await?;
@@ -208,14 +215,18 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         return root
             .checkout_version(reference)
             .await
+            .map(Arc::new)
             .with_context(|| format!("failed to check out tag {reference}"));
     }
     bail!(
         "reference '{reference}' was not found as a branch or tag; use a numeric version, branch:<name>, or tag:<name>"
     )
 }
-async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo> {
-    let dataset = &connection.dataset;
+pub(super) async fn build_dataset_info(
+    dataset: &Dataset,
+    dataset_uri: &str,
+    reference: &str,
+) -> Result<DatasetInfo> {
     let manifest = dataset.manifest();
     let arrow_schema = ArrowSchema::from(&manifest.schema);
     let blob_columns: HashSet<_> = arrow_schema
@@ -242,9 +253,11 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
         .collect();
 
     let mut fragments = Vec::with_capacity(manifest.fragments.len());
+    let mut rows = 0usize;
     for file_fragment in dataset.get_fragments() {
+        let physical_rows = file_fragment.physical_rows().await?;
         let metadata = file_fragment.metadata();
-        let deletion = if let Some(deletion_file) = &metadata.deletion_file {
+        let (deletion, deleted_rows) = if let Some(deletion_file) = &metadata.deletion_file {
             let vector = file_fragment.get_deletion_vector().await?;
             let (count, offsets) = if let Some(vector) = vector.as_deref() {
                 let count = vector.len();
@@ -263,26 +276,36 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
             } else {
                 "bin"
             };
-            Some(DeletionView {
-                path: format!(
-                    "_deletions/{}-{}-{}.{}",
-                    metadata.id, deletion_file.read_version, deletion_file.id, extension
-                ),
-                file_type,
-                read_version: deletion_file.read_version,
-                id: deletion_file.id,
+            (
+                Some(DeletionView {
+                    path: format!(
+                        "_deletions/{}-{}-{}.{}",
+                        metadata.id, deletion_file.read_version, deletion_file.id, extension
+                    ),
+                    file_type,
+                    read_version: deletion_file.read_version,
+                    id: deletion_file.id,
+                    count,
+                    offsets,
+                    offsets_truncated: count > MAX_DELETION_OFFSETS,
+                }),
                 count,
-                offsets,
-                offsets_truncated: count > MAX_DELETION_OFFSETS,
-            })
+            )
         } else {
-            None
+            (None, 0)
         };
+        let visible_rows = physical_rows.checked_sub(deleted_rows).with_context(|| {
+            format!(
+                "fragment {} reports {deleted_rows} deleted rows but only {physical_rows} physical rows",
+                metadata.id
+            )
+        })?;
+        rows += visible_rows;
 
         fragments.push(FragmentView {
             id: metadata.id,
-            physical_rows: metadata.physical_rows,
-            visible_rows: metadata.num_rows(),
+            physical_rows: Some(physical_rows),
+            visible_rows: Some(visible_rows),
             files: metadata
                 .files
                 .iter()
@@ -299,28 +322,16 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
         });
     }
 
-    let mut branches: Vec<_> = dataset
-        .list_branches()
-        .await?
-        .into_iter()
-        .map(|(name, branch)| BranchView {
-            name,
-            parent_branch: branch.parent_branch,
-            parent_version: branch.parent_version,
-        })
-        .collect();
-    branches.sort_by(|left, right| left.name.cmp(&right.name));
-
     let manifest_location = dataset.manifest_location();
     Ok(DatasetInfo {
-        uri: connection.dataset_uri.clone(),
-        reference: connection.reference.clone(),
+        uri: dataset_uri.to_string(),
+        reference: reference.to_string(),
         version: manifest.version,
         branch: manifest
             .branch
             .clone()
             .unwrap_or_else(|| "main".to_string()),
-        rows: dataset.count_rows(None).await?,
+        rows,
         schema,
         manifest: ManifestView {
             version: manifest.version,
@@ -354,6 +365,48 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
                 .collect(),
         },
         fragments,
-        branches,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::{Int32Array, RecordBatch, RecordBatchIterator};
+    use arrow_schema::{DataType, Field, Schema as TestArrowSchema};
+
+    use super::*;
+    use crate::api::state::{AppState, connected, discovered};
+
+    #[tokio::test]
+    async fn connect_reuses_the_discovered_dataset_root() {
+        let schema = Arc::new(TestArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+            .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let path =
+            std::env::temp_dir().join(format!("lance-inspector-discovery-{}", Uuid::new_v4()));
+        let uri = path.to_string_lossy().into_owned();
+        Dataset::write(reader, &uri, None).await.unwrap();
+
+        let state = AppState::new();
+        let catalog = discover(&state, DiscoverRequest { uri }).await.unwrap();
+        let (discovered_root, _) = discovered(&state, catalog.discovery_id).unwrap();
+
+        let response = connect(
+            &state,
+            ConnectRequest {
+                discovery_id: catalog.discovery_id,
+                reference: Some("main".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let connection = connected(&state, response.connection_id).unwrap();
+
+        assert!(Arc::ptr_eq(&discovered_root, &connection.dataset));
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }

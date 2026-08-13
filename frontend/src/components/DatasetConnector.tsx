@@ -240,7 +240,7 @@ export function ReferenceBrowser({
     fetch('/api/dataset/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uri: catalog.uri, reference }),
+      body: JSON.stringify({ discovery_id: catalog.discovery_id, reference }),
     })
       .then(async (response) => {
         const body = await response.json()

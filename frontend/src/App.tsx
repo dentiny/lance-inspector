@@ -180,7 +180,7 @@ function App() {
           <DatasetQueryView info={info} mode="user" connectionId={connectionId} />
         ) : (
           <>
-            {selection.type === 'overview' && <Overview info={info} />}
+            {selection.type === 'overview' && <Overview info={info} catalog={catalog} />}
             {selection.type === 'sql' && <DatasetQueryView info={info} mode="infra" connectionId={connectionId} />}
             {selectedFile && <FileDataView info={info} file={selectedFile} connectionId={connectionId} />}
           </>

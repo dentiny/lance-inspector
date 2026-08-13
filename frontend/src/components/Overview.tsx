@@ -1,12 +1,13 @@
 import { Activity, GitBranch, HardDrive, Image as ImageIcon, Layers3, Rows3 } from 'lucide-react'
 import { formatBytes } from '../format'
-import type { DatasetInfo } from '../types'
+import type { DatasetInfo, ReferenceCatalog } from '../types'
 import { StatCard } from './DatasetWidgets'
 
-export function Overview({ info }: { info: DatasetInfo }) {
+export function Overview({ info, catalog }: { info: DatasetInfo; catalog?: ReferenceCatalog }) {
   const deletionCount = info.fragments.reduce((total, fragment) => total + (fragment.deletion?.count ?? 0), 0)
   const dataSize = info.fragments.flatMap((fragment) => fragment.files)
     .reduce((total, file) => total + (file.size_bytes ?? 0), 0)
+  const branches = catalog?.branches.filter((branch) => branch.name !== 'main') ?? []
   return (
     <div className="page">
       <div className="page-heading">
@@ -21,7 +22,7 @@ export function Overview({ info }: { info: DatasetInfo }) {
         <StatCard icon={<Rows3 />} label="Visible rows" value={info.rows.toLocaleString()} detail={`${deletionCount} physically deleted`} />
         <StatCard icon={<Layers3 />} label="Fragments" value={info.fragments.length} detail={`${info.schema.length} top-level fields`} />
         <StatCard icon={<HardDrive />} label="Data size" value={formatBytes(dataSize)} detail="manifest-reported" />
-        <StatCard icon={<GitBranch />} label="Version" value={`v${info.version}`} detail={`${info.branch} · ${info.branches.length} child branch${info.branches.length === 1 ? '' : 'es'}`} />
+        <StatCard icon={<GitBranch />} label="Version" value={`v${info.version}`} detail={`${info.branch} · ${branches.length} child branch${branches.length === 1 ? '' : 'es'}`} />
       </div>
       <section className="panel">
         <div className="panel-title">
@@ -55,12 +56,12 @@ export function Overview({ info }: { info: DatasetInfo }) {
           ))}
         </div>
       </section>
-      {info.branches.length > 0 && (
+      {branches.length > 0 && (
         <section className="panel">
           <div className="panel-title"><div><span className="eyebrow">References</span><h2>Branches</h2></div></div>
           <div className="branch-list">
             <div className="branch-row"><GitBranch size={15} /><strong>main</strong><span>current · v{info.version}</span></div>
-            {info.branches.map((branch) => (
+            {branches.map((branch) => (
               <div className="branch-row" key={branch.name}>
                 <GitBranch size={15} /><strong>{branch.name}</strong>
                 <span>from {branch.parent_branch ?? 'main'} · v{branch.parent_version}</span>

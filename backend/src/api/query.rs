@@ -78,7 +78,7 @@ async fn read_rows(connection: &ConnectedDataset, query: RowsQuery) -> Result<Ro
     Ok(RowsResponse {
         offset: query.offset,
         limit,
-        total: connection.dataset.count_rows(None).await?,
+        total: connection.info.rows,
         columns: columns.scalar,
         media_columns: columns.media,
         rows,
@@ -306,7 +306,7 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use lance::Dataset;
 
-    use crate::api::state::SessionEntry;
+    use crate::api::{dataset::build_dataset_info, state::SessionEntry};
 
     #[test]
     fn accepts_only_read_only_sql() {
@@ -334,11 +334,8 @@ mod tests {
         let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
         let uri = format!("memory://cursor-test-{}", Uuid::new_v4());
         let dataset = Arc::new(Dataset::write(reader, &uri, None).await.unwrap());
-        let connection = ConnectedDataset {
-            dataset,
-            dataset_uri: uri,
-            reference: "main".to_string(),
-        };
+        let info = Arc::new(build_dataset_info(&dataset, &uri, "main").await.unwrap());
+        let connection = ConnectedDataset { dataset, info };
         let connection_id = Uuid::new_v4();
         let state = AppState::new();
         state

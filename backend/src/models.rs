@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -19,13 +19,12 @@ pub struct DatasetInfo {
     pub schema: Vec<SchemaField>,
     pub manifest: ManifestView,
     pub fragments: Vec<FragmentView>,
-    pub branches: Vec<BranchView>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ConnectResponse {
     pub connection_id: Uuid,
-    pub dataset: DatasetInfo,
+    pub dataset: Arc<DatasetInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,14 +85,8 @@ pub struct DeletionView {
 }
 
 #[derive(Debug, Serialize)]
-pub struct BranchView {
-    pub name: String,
-    pub parent_branch: Option<String>,
-    pub parent_version: u64,
-}
-
-#[derive(Debug, Serialize)]
 pub struct ReferenceCatalog {
+    pub discovery_id: Uuid,
     pub uri: String,
     pub branches: Vec<BranchHistory>,
     pub tags: Vec<TagView>,

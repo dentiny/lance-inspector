@@ -15,6 +15,9 @@ pub(crate) struct ApiError(pub(super) anyhow::Error);
 pub(super) struct UnknownConnection(pub(super) Uuid);
 
 #[derive(Debug)]
+pub(super) struct UnknownDiscovery(pub(super) Uuid);
+
+#[derive(Debug)]
 pub(super) struct UnknownQueryCursor(pub(super) Uuid);
 
 #[derive(Debug)]
@@ -22,6 +25,12 @@ pub(super) struct InvalidRequest(pub(super) String);
 
 #[derive(Debug)]
 pub(super) struct QueryExecutionFailed(pub(super) String);
+
+#[derive(Debug)]
+pub(super) struct BlobUnavailable {
+    pub(super) column: String,
+    pub(super) row_address: u64,
+}
 
 #[derive(Debug)]
 pub(super) struct RangeNotSatisfiable {
@@ -40,6 +49,18 @@ impl std::fmt::Display for UnknownConnection {
 }
 
 impl std::error::Error for UnknownConnection {}
+
+impl std::fmt::Display for UnknownDiscovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "dataset discovery {} was not found or has expired; rediscover the dataset",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownDiscovery {}
 
 impl std::fmt::Display for UnknownQueryCursor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -73,6 +94,18 @@ impl std::fmt::Display for QueryExecutionFailed {
 
 impl std::error::Error for QueryExecutionFailed {}
 
+impl std::fmt::Display for BlobUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "blob column '{}' is null or unavailable at row address {}",
+            self.column, self.row_address
+        )
+    }
+}
+
+impl std::error::Error for BlobUnavailable {}
+
 impl std::fmt::Display for RangeNotSatisfiable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -98,9 +131,13 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
-        let status = if self.0.downcast_ref::<UnknownConnection>().is_some() {
+        let status = if self.0.downcast_ref::<UnknownConnection>().is_some()
+            || self.0.downcast_ref::<UnknownDiscovery>().is_some()
+        {
             StatusCode::GONE
-        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some() {
+        } else if self.0.downcast_ref::<UnknownQueryCursor>().is_some()
+            || self.0.downcast_ref::<BlobUnavailable>().is_some()
+        {
             StatusCode::NOT_FOUND
         } else if self.0.downcast_ref::<QueryExecutionFailed>().is_some() {
             StatusCode::UNPROCESSABLE_ENTITY

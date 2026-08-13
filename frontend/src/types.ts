@@ -40,7 +40,6 @@ export type DatasetInfo = {
   schema: SchemaField[]
   manifest: Record<string, unknown>
   fragments: Fragment[]
-  branches: { name: string; parent_branch: string | null; parent_version: number }[]
 }
 
 export type ConnectedDataset = {
@@ -49,6 +48,7 @@ export type ConnectedDataset = {
 }
 
 export type ReferenceCatalog = {
+  discovery_id: string
   uri: string
   branches: {
     name: string
