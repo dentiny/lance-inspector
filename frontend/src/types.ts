@@ -38,6 +38,16 @@ export type DatasetInfo = {
   branch: string
   rows: number
   schema: SchemaField[]
+  indices: {
+    name: string
+    index_type: string
+    type_url: string
+    fields: string[]
+    rows_indexed: number
+    segment_count: number
+    total_size_bytes: number | null
+    details: unknown | null
+  }[]
   manifest: Record<string, unknown>
   fragments: Fragment[]
 }

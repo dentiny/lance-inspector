@@ -6,13 +6,13 @@ use axum::{
     Json,
     extract::{Query, State},
 };
-use lance::Dataset;
+use lance::{Dataset, index::DatasetIndexExt};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::models::{
     BranchHistory, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FragmentView,
-    ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
+    IndexView, ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
 };
 
 use super::{
@@ -251,6 +251,34 @@ pub(super) async fn build_dataset_info(
                 .collect(),
         })
         .collect();
+    let indices = dataset
+        .describe_indices(None)
+        .await?
+        .into_iter()
+        .map(|index| IndexView {
+            name: index.name().to_string(),
+            index_type: index.index_type().to_string(),
+            type_url: index.type_url().to_string(),
+            fields: index
+                .field_ids()
+                .iter()
+                .map(|field_id| {
+                    manifest
+                        .schema
+                        .field_by_id(*field_id as i32)
+                        .map(|field| field.name.clone())
+                        .unwrap_or_else(|| format!("#{field_id}"))
+                })
+                .collect(),
+            rows_indexed: index.rows_indexed(),
+            segment_count: index.segments().len(),
+            total_size_bytes: index.total_size_bytes(),
+            details: index
+                .details()
+                .ok()
+                .and_then(|details| serde_json::from_str(&details).ok()),
+        })
+        .collect();
 
     let mut fragments = Vec::with_capacity(manifest.fragments.len());
     let mut rows = 0usize;
@@ -333,6 +361,7 @@ pub(super) async fn build_dataset_info(
             .unwrap_or_else(|| "main".to_string()),
         rows,
         schema,
+        indices,
         manifest: ManifestView {
             version: manifest.version,
             path: manifest_location.path.to_string(),

@@ -17,6 +17,7 @@ pub struct DatasetInfo {
     pub branch: String,
     pub rows: usize,
     pub schema: Vec<SchemaField>,
+    pub indices: Vec<IndexView>,
     pub manifest: ManifestView,
     pub fragments: Vec<FragmentView>,
 }
@@ -34,6 +35,18 @@ pub struct SchemaField {
     pub nullable: bool,
     pub media: bool,
     pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IndexView {
+    pub name: String,
+    pub index_type: String,
+    pub type_url: String,
+    pub fields: Vec<String>,
+    pub rows_indexed: u64,
+    pub segment_count: usize,
+    pub total_size_bytes: Option<u64>,
+    pub details: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
