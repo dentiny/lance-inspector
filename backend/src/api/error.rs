@@ -146,6 +146,6 @@ impl IntoResponse for ApiError {
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
-        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
+        (status, Json(json!({ "error": format!("{:#}", self.0) }))).into_response()
     }
 }
