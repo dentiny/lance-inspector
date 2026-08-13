@@ -66,7 +66,6 @@ export type ReferenceCatalog = {
     parent_version: number | null
     versions: {
       version: number
-      timestamp: string
       total_rows: number | null
       tags: string[]
     }[]

@@ -191,14 +191,13 @@ function LineageGraph({
                     className={`lineage-node ${connecting === reference ? 'connecting' : ''}`}
                     onClick={() => onSelect(reference)}
                     disabled={Boolean(connecting)}
-                    title={`${branch.name} at version ${version.version} · ${new Date(version.timestamp).toLocaleString()}`}
+                    title={`${branch.name} at version ${version.version}`}
                   >
                     <span className="lineage-node-title"><History size={12} />version {version.version}</span>
                     {version.version === latestVersion && <span className="lineage-latest">latest</span>}
                     <span className="lineage-rows">
                       {version.total_rows === null ? 'rows unavailable' : `${version.total_rows.toLocaleString()} rows`}
                     </span>
-                    <time>{new Date(version.timestamp).toLocaleDateString()}</time>
                     {connecting === reference && <RefreshCw className="spin lineage-loading" size={13} />}
                   </button>
                   {version.tags.length > 0 && (

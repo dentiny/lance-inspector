@@ -116,7 +116,6 @@ pub struct BranchHistory {
 #[derive(Debug, Serialize)]
 pub struct VersionView {
     pub version: u64,
-    pub timestamp: String,
     pub total_rows: Option<u64>,
     pub tags: Vec<String>,
 }

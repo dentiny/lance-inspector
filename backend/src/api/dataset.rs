@@ -87,17 +87,21 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
         } else {
             root.checkout_branch(&name).await?
         };
+        let loaded_version = dataset.version();
         let versions = dataset
-            .versions()
+            .version_refs()
             .await?
             .into_iter()
             .map(|version| VersionView {
                 version: version.version,
-                timestamp: version.timestamp.to_rfc3339(),
-                total_rows: version
-                    .metadata
-                    .get("total_rows")
-                    .and_then(|value| value.parse().ok()),
+                total_rows: (version.version == loaded_version.version)
+                    .then(|| {
+                        loaded_version
+                            .metadata
+                            .get("total_rows")
+                            .and_then(|value| value.parse().ok())
+                    })
+                    .flatten(),
                 tags: tags
                     .iter()
                     .filter(|tag| tag.branch == name && tag.version == version.version)

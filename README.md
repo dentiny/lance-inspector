@@ -125,10 +125,11 @@ after Lance has discovered the dataset's actual branch and version metadata.
 ### 2. Choose a snapshot from the lineage graph
 
 After reading the dataset location, the landing flow displays each branch and
-its manifest-version history. Every version shows its timestamp, row count when
-available, and associated tags. Solid edges connect versions on the same branch;
-curved fork edges connect a child branch to its exact parent-version node. This
-makes branch ancestry visible without inspecting the `_refs` files manually.
+all attached versions without loading every historical manifest. Branch heads
+show their row count when available, and tags remain associated with their
+versions. Solid edges connect versions on the same branch; curved fork edges
+connect a child branch to its exact parent-version node. This makes branch
+ancestry visible without inspecting the `_refs` files manually.
 
 ![Interactive snapshot lineage graph showing version and fork edges](docs/images/snapshot-lineage-graph-current.png)
 
