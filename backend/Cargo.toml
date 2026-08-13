@@ -18,18 +18,17 @@ arrow-array = "58.4.0"
 arrow-json = "58.4.0"
 arrow-schema = "58.4.0"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
-clap = { version = "4.6.6", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 datafusion-execution = { version = "54.1.0", default-features = false }
-foyer = { version = "0.22.3", package = "foyer-memory", default-features = false }
-foyer-tokio = { version = "0.22.3", features = ["runtime-tokio"] }
 futures = { version = "0.3.33", default-features = false, features = ["async-await", "std"] }
-lance = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620" }
+lance = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620", default-features = false, features = ["aws", "gcp"] }
+lru = "0.18.2"
 prost = "0.14.4"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 tikv-jemallocator = "0.7.0"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync"] }
-tower-http = { version = "0.7.0", features = ["fs", "trace"] }
+# Keep this aligned with reqwest's transitive version to avoid compiling two tower-http releases.
+tower-http = { version = "0.6.11", features = ["fs", "trace"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 
 [target.'cfg(unix)'.dependencies]

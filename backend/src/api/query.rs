@@ -169,9 +169,7 @@ async fn read_sql_page(
         .queries
         .get(&cursor_id)
         .ok_or(UnknownQueryCursor(cursor_id))?;
-    let cursor_handle = entry.value().clone();
-    drop(entry);
-    let mut cursor = cursor_handle.lock().await;
+    let mut cursor = entry.lock().await;
     if cursor.connection_id != query.connection_id
         || cursor.last_accessed.elapsed() >= QUERY_IDLE_TTL
     {
@@ -259,12 +257,10 @@ pub(crate) async fn cancel_sql(
     Query(query): Query<ConnectionQuery>,
 ) -> Result<StatusCode, ApiError> {
     connected(&state, query.connection_id).map_err(ApiError)?;
-    if let Some(entry) = state.queries.get(&cursor_id) {
-        let cursor_handle = entry.value().clone();
-        drop(entry);
-        if cursor_handle.lock().await.connection_id == query.connection_id {
-            state.queries.remove(&cursor_id);
-        }
+    if let Some(cursor) = state.queries.get(&cursor_id)
+        && cursor.lock().await.connection_id == query.connection_id
+    {
+        state.queries.remove(&cursor_id);
     }
     Ok(StatusCode::NO_CONTENT)
 }
