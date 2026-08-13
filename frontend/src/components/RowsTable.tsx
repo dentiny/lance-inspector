@@ -59,7 +59,7 @@ function MediaValue({
   } else if (kind === 'video') {
     content = <video className="media-video" src={source} controls preload="metadata" />
   } else {
-    content = <a className="blob-link" href={source} target="_blank">open blob</a>
+    content = <a className="blob-link" href={source} target="_blank" rel="noopener noreferrer">open blob</a>
   }
   return (
     <div
