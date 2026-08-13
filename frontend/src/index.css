@@ -231,6 +231,12 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .panel-title { min-height: 66px; padding: 15px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); gap: 20px; }
 .panel-title h2, .panel-title h3 { margin: 3px 0 0; color: #edf1f7; font-size: 15px; font-weight: 600; }
 .panel-title h3 { font: 12px var(--mono); }
+.collapsible-panel:not([open]) > .panel-title { border-bottom: 0; }
+.collapsible-panel > summary { cursor: pointer; list-style: none; }
+.collapsible-panel > summary::-webkit-details-marker { display: none; }
+.panel-summary-meta { display: flex; align-items: center; gap: 10px; }
+.panel-chevron { color: var(--faint); transition: transform .16s ease; }
+.collapsible-panel[open] .panel-chevron { transform: rotate(180deg); }
 .schema-list { padding: 4px 0; }
 .schema-row { min-height: 42px; display: grid; grid-template-columns: 38px minmax(120px, 1fr) minmax(200px, 1.5fr) auto 70px; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
 .schema-row:last-child { border-bottom: 0; }
@@ -240,6 +246,16 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .nullable, .required { justify-self: end; font: 9px var(--mono); }
 .nullable { color: var(--faint); }
 .required { color: var(--amber); }
+.index-list { padding: 8px; }
+.index-card { padding: 13px 11px; border-bottom: 1px solid var(--line-soft); }
+.index-card:last-child { border-bottom: 0; }
+.index-heading { display: flex; align-items: center; gap: 9px; color: var(--text); }
+.index-heading strong { font: 12px var(--mono); }
+.index-type { margin-left: auto; color: var(--cyan); border: 1px solid rgba(98,200,212,.22); background: rgba(98,200,212,.08); border-radius: 999px; padding: 3px 7px; font: 9px var(--mono); }
+.index-metrics { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 24px 0; color: var(--muted); font: 10px var(--mono); }
+.index-details { margin: 10px 24px 0; color: var(--faint); font: 10px var(--mono); }
+.index-details summary { cursor: pointer; }
+.index-details pre { max-height: 280px; overflow: auto; color: var(--cyan); white-space: pre-wrap; word-break: break-word; }
 .fragment-list, .branch-list { padding: 8px; }
 .fragment-card, .branch-row { min-height: 45px; padding: 0 11px; display: grid; align-items: center; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 10px var(--mono); }
 .fragment-card { grid-template-columns: 1.4fr 1fr 1fr auto; }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowRight, CircleAlert, RefreshCw } from 'lucide-react'
 import { connectedUrl, HttpError, requireOk } from '../api'
 import type { DatasetInfo, SqlCursorResponse, SqlPageResponse, TableData } from '../types'
+import { DatasetStructure } from './DatasetStructure'
 import { RowsTable } from './RowsTable'
 
 const DEFAULT_SQL = 'SELECT * FROM dataset'
@@ -245,6 +246,7 @@ export function DatasetQueryView({
         <span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>
       </div>
       <SqlQueryView connectionId={connectionId} />
+      <DatasetStructure info={info} />
     </div>
   )
 }

@@ -1,6 +1,7 @@
-import { Activity, GitBranch, HardDrive, Image as ImageIcon, Layers3, Rows3 } from 'lucide-react'
+import { Activity, GitBranch, HardDrive, Layers3, Rows3 } from 'lucide-react'
 import { formatBytes } from '../format'
 import type { DatasetInfo, ReferenceCatalog } from '../types'
+import { DatasetStructure } from './DatasetStructure'
 import { StatCard } from './DatasetWidgets'
 
 export function Overview({ info, catalog }: { info: DatasetInfo; catalog?: ReferenceCatalog }) {
@@ -24,23 +25,7 @@ export function Overview({ info, catalog }: { info: DatasetInfo; catalog?: Refer
         <StatCard icon={<HardDrive />} label="Data size" value={formatBytes(dataSize)} detail="manifest-reported" />
         <StatCard icon={<GitBranch />} label="Version" value={`v${info.version}`} detail={`${info.branch} · ${branches.length} child branch${branches.length === 1 ? '' : 'es'}`} />
       </div>
-      <section className="panel">
-        <div className="panel-title">
-          <div><span className="eyebrow">Logical model</span><h2>Schema</h2></div>
-          <span className="count-badge">{info.schema.length} fields</span>
-        </div>
-        <div className="schema-list">
-          {info.schema.map((field, index) => (
-            <div className="schema-row" key={field.name}>
-              <span className="field-index">{String(index + 1).padStart(2, '0')}</span>
-              <strong>{field.name}</strong>
-              <code>{field.data_type}</code>
-              {field.media && <span className="media-badge"><ImageIcon size={12} /> media</span>}
-              <span className={field.nullable ? 'nullable' : 'required'}>{field.nullable ? 'nullable' : 'required'}</span>
-            </div>
-          ))}
-        </div>
-      </section>
+      <DatasetStructure info={info} />
       <section className="panel">
         <div className="panel-title"><div><span className="eyebrow">Physical model</span><h2>Fragments</h2></div></div>
         <div className="fragment-list">
