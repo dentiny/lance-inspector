@@ -73,10 +73,13 @@ function MediaValue({
 }
 
 function ScalarValue({ value }: { value: unknown }) {
-  if (value == null) return <span className="null-value">null</span>
-  if (typeof value === 'boolean') return <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
-  if (typeof value === 'object') return <code>{JSON.stringify(value)}</code>
-  return <span>{String(value)}</span>
+  let content
+  if (value == null) content = <span className="null-value">null</span>
+  else if (typeof value === 'boolean') content = <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
+  else if (typeof value === 'object') content = <code>{JSON.stringify(value)}</code>
+  else content = <span>{String(value)}</span>
+
+  return <div className="scalar-value">{content}</div>
 }
 
 export function RowsTable({

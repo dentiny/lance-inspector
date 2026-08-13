@@ -314,9 +314,10 @@ button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .table-scroll { overflow: auto; max-height: 630px; }
 table { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: 11px; }
 th { position: sticky; top: 0; z-index: 2; background: var(--surface-2); color: var(--muted); text-align: left; height: 37px; padding: 0 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); font: 9px var(--mono); letter-spacing: .04em; }
-td { min-width: 100px; max-width: 260px; height: 55px; padding: 8px 12px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); color: #bdc6d2; font: 10px/1.5 var(--mono); overflow: hidden; text-overflow: ellipsis; }
+td { min-width: 100px; max-width: 260px; height: 55px; padding: 8px 12px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); color: #bdc6d2; font: 10px/1.5 var(--mono); }
 tbody tr:hover td { background: rgba(98,200,212,.025); }
-td code { white-space: nowrap; font: inherit; }
+.scalar-value { max-width: 236px; overflow-x: auto; white-space: nowrap; }
+.scalar-value code { font: inherit; }
 .null-value { color: var(--faint); font-style: italic; }
 .bool-true { color: var(--green); }
 .bool-false { color: var(--red); }
