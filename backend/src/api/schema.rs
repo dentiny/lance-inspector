@@ -1,4 +1,7 @@
-use arrow_schema::{Field, Schema as ArrowSchema};
+use std::collections::HashMap;
+
+use arrow_schema::{DataType, Field, Schema};
+use lance_core::datatypes::BlobV2Layout;
 
 use crate::models::MediaColumn;
 
@@ -6,64 +9,82 @@ use crate::models::MediaColumn;
 const BLOB_EXTENSION: &str = "lance.blob.v2";
 
 pub(super) struct DatasetColumns {
+    pub(super) projection: Vec<String>,
     pub(super) scalar: Vec<String>,
-    pub(super) media: Vec<MediaColumn>,
+    pub(super) media: Vec<MediaProjection>,
 }
 
-pub(super) struct SqlResultColumns {
+pub(super) struct SqlColumns {
     pub(super) scalar_indices: Vec<usize>,
     pub(super) scalar: Vec<String>,
-    pub(super) media: Vec<MediaColumn>,
+    pub(super) media_projections: Vec<MediaProjection>,
 }
 
-pub(super) fn dataset_columns(schema: &ArrowSchema) -> DatasetColumns {
+#[derive(Clone)]
+pub(super) struct MediaProjection {
+    pub(super) result_index: usize,
+    pub(super) column: MediaColumn,
+}
+
+pub(super) fn dataset_columns(
+    schema: &Schema,
+    source_field_ids: &HashMap<String, i32>,
+) -> DatasetColumns {
+    let mut projection = Vec::new();
     let mut scalar = Vec::new();
     let mut media = Vec::new();
-    for field in schema.fields() {
-        if is_blob_field(field) {
-            media.push(media_column(field, schema));
+    for (index, field) in schema.fields().iter().enumerate() {
+        projection.push(field.name().clone());
+        if is_blob_field(field) || is_blob_array_field(field) {
+            media.push(media_projection(
+                field,
+                source_field_ids[field.name()],
+                index,
+            ));
         } else {
             scalar.push(field.name().clone());
         }
     }
-    DatasetColumns { scalar, media }
-}
-
-pub(super) fn sql_result_columns(
-    result_schema: &ArrowSchema,
-    dataset_schema: &ArrowSchema,
-) -> SqlResultColumns {
-    let mut scalar_indices = Vec::new();
-    let mut scalar = Vec::new();
-    let mut media = Vec::new();
-    for (index, field) in result_schema.fields().iter().enumerate() {
-        if is_sql_blob_field(field, dataset_schema) {
-            media.push(media_column(field, result_schema));
-        } else {
-            scalar_indices.push(index);
-            scalar.push(field.name().clone());
-        }
-    }
-    SqlResultColumns {
-        scalar_indices,
+    DatasetColumns {
+        projection,
         scalar,
         media,
     }
 }
 
-fn media_column(field: &Field, schema: &ArrowSchema) -> MediaColumn {
-    let mime_name = format!("{}_mime", field.name());
-    MediaColumn {
-        name: field.name().clone(),
-        mime_column: schema.field_with_name(&mime_name).ok().map(|_| mime_name),
+pub(super) fn sql_columns(
+    result_schema: &Schema,
+    dataset_schema: &Schema,
+    source_names: &[Option<String>],
+    source_field_ids: &HashMap<String, i32>,
+) -> SqlColumns {
+    let mut scalar_indices = Vec::new();
+    let mut scalar = Vec::new();
+    let mut media_projections = Vec::new();
+    for (index, field) in result_schema.fields().iter().enumerate() {
+        let source_name = source_names
+            .get(index)
+            .and_then(Option::as_deref)
+            .unwrap_or(field.name());
+        let source_field = dataset_schema.field_with_name(source_name).ok();
+        let array = is_blob_array_field(field) && source_field.is_some_and(is_blob_array_field);
+        let scalar_blob = is_blob_field(field) && source_field.is_some_and(is_blob_field);
+        if array || scalar_blob {
+            media_projections.push(media_projection(
+                field,
+                source_field_ids[source_name],
+                index,
+            ));
+            continue;
+        }
+        scalar_indices.push(index);
+        scalar.push(field.name().clone());
     }
-}
-
-fn is_sql_blob_field(field: &Field, dataset_schema: &ArrowSchema) -> bool {
-    is_blob_field(field)
-        || dataset_schema
-            .field_with_name(field.name())
-            .is_ok_and(is_blob_field)
+    SqlColumns {
+        scalar_indices,
+        scalar,
+        media_projections,
+    }
 }
 
 pub(super) fn is_blob_field(field: &Field) -> bool {
@@ -71,4 +92,102 @@ pub(super) fn is_blob_field(field: &Field) -> bool {
         .metadata()
         .get("ARROW:extension:name")
         .is_some_and(|name| name == BLOB_EXTENSION)
+        || match field.data_type() {
+            DataType::Struct(fields) => BlobV2Layout::classify(fields).is_some(),
+            _ => false,
+        }
+}
+
+pub(super) fn is_blob_array_field(field: &Field) -> bool {
+    match field.data_type() {
+        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            is_blob_field(item) || is_blob_array_field(item)
+        }
+        _ => false,
+    }
+}
+
+fn media_projection(field: &Field, source_field_id: i32, result_index: usize) -> MediaProjection {
+    MediaProjection {
+        result_index,
+        column: MediaColumn {
+            name: field.name().clone(),
+            source_field_id,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use lance_core::datatypes::BLOB_V2_DESC_FIELDS;
+
+    use super::*;
+
+    #[test]
+    fn recognizes_sql_blob_array_from_dataset_schema() {
+        let blob =
+            Field::new("item", DataType::LargeBinary, true).with_metadata(HashMap::from([(
+                "ARROW:extension:name".to_string(),
+                BLOB_EXTENSION.to_string(),
+            )]));
+        let dataset_schema = Schema::new(vec![Field::new(
+            "image_array",
+            DataType::List(Arc::new(blob)),
+            true,
+        )]);
+        let descriptor = Field::new("item", DataType::Struct(BLOB_V2_DESC_FIELDS.clone()), true);
+        let result_schema = Schema::new(vec![Field::new(
+            "image_array",
+            DataType::List(Arc::new(descriptor)),
+            true,
+        )]);
+
+        let columns = sql_columns(
+            &result_schema,
+            &dataset_schema,
+            &[Some("image_array".to_string())],
+            &HashMap::from([("image_array".to_string(), 7)]),
+        );
+
+        assert_eq!(columns.media_projections.len(), 1);
+        assert_eq!(columns.media_projections[0].column.source_field_id, 7);
+    }
+
+    #[test]
+    fn ignores_non_blob_alias_collisions() {
+        let blob =
+            Field::new("blob", DataType::LargeBinary, true).with_metadata(HashMap::from([(
+                "ARROW:extension:name".to_string(),
+                BLOB_EXTENSION.to_string(),
+            )]));
+        let result = Schema::new(vec![Field::new("blob", DataType::Int32, false)]);
+
+        let columns = sql_columns(
+            &result,
+            &Schema::new(vec![blob]),
+            &[None],
+            &HashMap::from([("blob".to_string(), 3)]),
+        );
+
+        assert!(columns.media_projections.is_empty());
+        assert_eq!(columns.scalar, vec!["blob"]);
+    }
+
+    #[test]
+    fn recognizes_nested_blob_arrays() {
+        let descriptor = Field::new("item", DataType::Struct(BLOB_V2_DESC_FIELDS.clone()), true);
+        let nested = Field::new(
+            "frames",
+            DataType::List(Arc::new(Field::new(
+                "items",
+                DataType::LargeList(Arc::new(descriptor)),
+                true,
+            ))),
+            true,
+        );
+
+        assert!(is_blob_array_field(&nested));
+    }
 }

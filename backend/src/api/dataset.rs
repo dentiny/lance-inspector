@@ -147,10 +147,7 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectRes
     };
     let dataset = resolve_reference(root, reference).await?;
     let dataset_info = Arc::new(build_dataset_info(&dataset, &uri, reference).await?);
-    let connection = ConnectedDataset {
-        dataset,
-        info: dataset_info.clone(),
-    };
+    let connection = ConnectedDataset::new(dataset, dataset_info.clone());
     let connection_id = Uuid::new_v4();
     state
         .connections

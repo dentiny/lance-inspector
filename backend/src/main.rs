@@ -19,10 +19,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::services::{ServeDir, ServeFile};
 
 use api::AppState;
 
@@ -68,15 +65,14 @@ async fn main() -> Result<()> {
         .route("/sql/start", post(api::start_sql))
         .route("/sql/{cursor_id}/page", get(api::sql_page))
         .route("/sql/{cursor_id}/cancel", post(api::cancel_sql))
-        .route("/media/{column}/{row_address}", get(api::media))
+        .route("/media/{field_id}/{row_address}", get(api::media))
         .with_state(state);
 
     let index = args.ui_dir.join("index.html");
     let static_files = ServeDir::new(&args.ui_dir).not_found_service(ServeFile::new(index));
     let app = Router::new()
         .nest("/api", api)
-        .fallback_service(static_files)
-        .layer(TraceLayer::new_for_http());
+        .fallback_service(static_files);
     #[cfg(all(feature = "profiling", unix))]
     let app = app.merge(profiler::routes());
 

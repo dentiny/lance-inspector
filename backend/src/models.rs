@@ -168,13 +168,19 @@ pub struct RowsResponse {
     pub total: usize,
     pub columns: Vec<String>,
     pub media_columns: Vec<MediaColumn>,
-    pub rows: Vec<Value>,
+    pub rows: Vec<RowView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MediaColumn {
     pub name: String,
-    pub mime_column: Option<String>,
+    pub source_field_id: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RowView {
+    pub values: Value,
+    pub media: BTreeMap<String, Vec<Vec<usize>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,7 +193,7 @@ pub struct SqlCursorResponse {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SqlPageResponse {
     pub sequence: u64,
-    pub rows: Vec<Value>,
+    pub rows: Vec<RowView>,
     pub done: bool,
     pub truncated: bool,
 }
