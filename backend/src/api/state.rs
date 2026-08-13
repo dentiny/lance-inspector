@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
-use crate::models::{FileEntry, FilesPage, SqlPageResponse};
+use crate::models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse};
 
 use super::error::UnknownConnection;
 
@@ -73,8 +73,7 @@ impl SessionEntry {
 #[derive(Clone)]
 pub(super) struct ConnectedDataset {
     pub(super) dataset: Arc<Dataset>,
-    pub(super) dataset_uri: String,
-    pub(super) reference: String,
+    pub(super) info: Arc<DatasetInfo>,
 }
 
 pub(super) struct FileListing {
@@ -130,7 +129,10 @@ mod tests {
     use axum::{http::StatusCode, response::IntoResponse};
 
     use super::*;
-    use crate::api::error::{ApiError, UnknownConnection};
+    use crate::api::{
+        dataset::build_dataset_info,
+        error::{ApiError, UnknownConnection},
+    };
 
     #[tokio::test]
     async fn isolates_connections_and_rejects_unknown_ids() {
@@ -148,29 +150,37 @@ mod tests {
         let state = AppState::new();
         let first_id = Uuid::new_v4();
         let second_id = Uuid::new_v4();
+        let first_info = Arc::new(
+            build_dataset_info(&dataset, "memory://first", "main")
+                .await
+                .unwrap(),
+        );
+        let second_info = Arc::new(
+            build_dataset_info(&dataset, "memory://second", "version:1")
+                .await
+                .unwrap(),
+        );
         state.connections.insert(
             first_id,
             SessionEntry::new(ConnectedDataset {
                 dataset: dataset.clone(),
-                dataset_uri: "memory://first".to_string(),
-                reference: "main".to_string(),
+                info: first_info,
             }),
         );
         state.connections.insert(
             second_id,
             SessionEntry::new(ConnectedDataset {
                 dataset,
-                dataset_uri: "memory://second".to_string(),
-                reference: "version:1".to_string(),
+                info: second_info,
             }),
         );
 
         assert_eq!(
-            connected(&state, first_id).unwrap().dataset_uri,
+            connected(&state, first_id).unwrap().info.uri,
             "memory://first"
         );
         assert_eq!(
-            connected(&state, second_id).unwrap().dataset_uri,
+            connected(&state, second_id).unwrap().info.uri,
             "memory://second"
         );
 

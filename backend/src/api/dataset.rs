@@ -11,8 +11,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::models::{
-    BranchHistory, BranchView, ConnectResponse, DataFileView, DatasetInfo, DeletionView,
-    FragmentView, ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
+    BranchHistory, ConnectResponse, DataFileView, DatasetInfo, DeletionView, FragmentView,
+    ManifestView, ReferenceCatalog, SchemaField, TagView, VersionView,
 };
 
 use super::{
@@ -27,12 +27,9 @@ const MAX_DELETION_OFFSETS: usize = 2_000;
 pub(crate) async fn dataset_info(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConnectionQuery>,
-) -> Result<Json<DatasetInfo>, ApiError> {
+) -> Result<Json<Arc<DatasetInfo>>, ApiError> {
     let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    build_dataset_info(&connection)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    Ok(Json(connection.info))
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,19 +137,18 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectRes
         .await
         .with_context(|| format!("failed to open Lance dataset {uri}"))?;
     let dataset = Arc::new(resolve_reference(root, reference).await?);
+    let dataset_info = Arc::new(build_dataset_info(&dataset, uri, reference).await?);
     let connection = ConnectedDataset {
         dataset,
-        dataset_uri: uri.to_string(),
-        reference: reference.to_string(),
+        info: dataset_info.clone(),
     };
-    let dataset = build_dataset_info(&connection).await?;
     let connection_id = Uuid::new_v4();
     state
         .connections
         .insert(connection_id, SessionEntry::new(connection));
     Ok(ConnectResponse {
         connection_id,
-        dataset,
+        dataset: dataset_info,
     })
 }
 
@@ -214,8 +210,11 @@ async fn resolve_reference(root: Dataset, reference: &str) -> Result<Dataset> {
         "reference '{reference}' was not found as a branch or tag; use a numeric version, branch:<name>, or tag:<name>"
     )
 }
-async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo> {
-    let dataset = &connection.dataset;
+pub(super) async fn build_dataset_info(
+    dataset: &Dataset,
+    dataset_uri: &str,
+    reference: &str,
+) -> Result<DatasetInfo> {
     let manifest = dataset.manifest();
     let arrow_schema = ArrowSchema::from(&manifest.schema);
     let blob_columns: HashSet<_> = arrow_schema
@@ -242,9 +241,11 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
         .collect();
 
     let mut fragments = Vec::with_capacity(manifest.fragments.len());
+    let mut rows = 0usize;
     for file_fragment in dataset.get_fragments() {
+        let physical_rows = file_fragment.physical_rows().await?;
         let metadata = file_fragment.metadata();
-        let deletion = if let Some(deletion_file) = &metadata.deletion_file {
+        let (deletion, deleted_rows) = if let Some(deletion_file) = &metadata.deletion_file {
             let vector = file_fragment.get_deletion_vector().await?;
             let (count, offsets) = if let Some(vector) = vector.as_deref() {
                 let count = vector.len();
@@ -263,26 +264,36 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
             } else {
                 "bin"
             };
-            Some(DeletionView {
-                path: format!(
-                    "_deletions/{}-{}-{}.{}",
-                    metadata.id, deletion_file.read_version, deletion_file.id, extension
-                ),
-                file_type,
-                read_version: deletion_file.read_version,
-                id: deletion_file.id,
+            (
+                Some(DeletionView {
+                    path: format!(
+                        "_deletions/{}-{}-{}.{}",
+                        metadata.id, deletion_file.read_version, deletion_file.id, extension
+                    ),
+                    file_type,
+                    read_version: deletion_file.read_version,
+                    id: deletion_file.id,
+                    count,
+                    offsets,
+                    offsets_truncated: count > MAX_DELETION_OFFSETS,
+                }),
                 count,
-                offsets,
-                offsets_truncated: count > MAX_DELETION_OFFSETS,
-            })
+            )
         } else {
-            None
+            (None, 0)
         };
+        let visible_rows = physical_rows.checked_sub(deleted_rows).with_context(|| {
+            format!(
+                "fragment {} reports {deleted_rows} deleted rows but only {physical_rows} physical rows",
+                metadata.id
+            )
+        })?;
+        rows += visible_rows;
 
         fragments.push(FragmentView {
             id: metadata.id,
-            physical_rows: metadata.physical_rows,
-            visible_rows: metadata.num_rows(),
+            physical_rows: Some(physical_rows),
+            visible_rows: Some(visible_rows),
             files: metadata
                 .files
                 .iter()
@@ -299,28 +310,16 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
         });
     }
 
-    let mut branches: Vec<_> = dataset
-        .list_branches()
-        .await?
-        .into_iter()
-        .map(|(name, branch)| BranchView {
-            name,
-            parent_branch: branch.parent_branch,
-            parent_version: branch.parent_version,
-        })
-        .collect();
-    branches.sort_by(|left, right| left.name.cmp(&right.name));
-
     let manifest_location = dataset.manifest_location();
     Ok(DatasetInfo {
-        uri: connection.dataset_uri.clone(),
-        reference: connection.reference.clone(),
+        uri: dataset_uri.to_string(),
+        reference: reference.to_string(),
         version: manifest.version,
         branch: manifest
             .branch
             .clone()
             .unwrap_or_else(|| "main".to_string()),
-        rows: dataset.count_rows(None).await?,
+        rows,
         schema,
         manifest: ManifestView {
             version: manifest.version,
@@ -354,6 +353,5 @@ async fn build_dataset_info(connection: &ConnectedDataset) -> Result<DatasetInfo
                 .collect(),
         },
         fragments,
-        branches,
     })
 }
