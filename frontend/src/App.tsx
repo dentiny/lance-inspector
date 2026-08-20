@@ -33,6 +33,7 @@ function App() {
   const [showReference, setShowReference] = useState(false)
   const fileRequest = useRef<AbortController | undefined>(undefined)
   const fileGeneration = useRef(0)
+  const loadingFilesRef = useRef(false)
   const info = connection?.dataset
   const connectionId = connection?.connection_id
 
@@ -50,6 +51,7 @@ function App() {
     const controller = new AbortController()
     fileRequest.current = controller
     const generation = append ? fileGeneration.current : ++fileGeneration.current
+    loadingFilesRef.current = true
     setLoadingFiles(append)
     try {
       const page = await requestJson<FilesPage>(
@@ -76,6 +78,7 @@ function App() {
     } finally {
       if (generation === fileGeneration.current) {
         fileRequest.current = undefined
+        loadingFilesRef.current = false
         setLoadingFiles(false)
       }
     }
@@ -84,7 +87,7 @@ function App() {
   const connected = (nextConnection: ConnectedDataset) => loadFiles(nextConnection, 0, false)
 
   const loadMoreFiles = () => {
-    if (!connection || nextFileOffset === null || loadingFiles) return
+    if (!connection || nextFileOffset === null || loadingFilesRef.current) return
     void loadFiles(connection, nextFileOffset, true)
   }
 
