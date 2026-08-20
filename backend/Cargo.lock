@@ -3819,6 +3819,7 @@ dependencies = [
  "axum",
  "datafusion-execution",
  "datafusion-expr",
+ "datafusion-sql",
  "file-format",
  "futures",
  "jemalloc_pprof",

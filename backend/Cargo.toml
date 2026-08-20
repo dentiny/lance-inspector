@@ -20,6 +20,7 @@ arrow-schema = "58.4.0"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 datafusion-execution = { version = "54.1.0", default-features = false }
 datafusion-expr = { version = "54.1.0", default-features = false }
+datafusion-sql = { version = "54.1.0", default-features = false }
 file-format = { version = "0.29.0", features = ["reader-ebml", "reader-id3v2", "reader-mp4"] }
 futures = { version = "0.3.33", default-features = false, features = ["std"] }
 lance = { git = "https://github.com/lance-format/lance.git", rev = "17307f28d149eff34a0ecc5eca0e6ca903981620", default-features = false, features = ["aws", "gcp"] }

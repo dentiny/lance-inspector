@@ -62,14 +62,12 @@ pub(super) fn sql_columns(
     let mut scalar = Vec::new();
     let mut media_projections = Vec::new();
     for (index, field) in result_schema.fields().iter().enumerate() {
-        let source_name = source_names
-            .get(index)
-            .and_then(Option::as_deref)
-            .unwrap_or(field.name());
-        let source_field = dataset_schema.field_with_name(source_name).ok();
+        let source_name = source_names.get(index).and_then(Option::as_deref);
+        let source_field = source_name.and_then(|name| dataset_schema.field_with_name(name).ok());
         let array = is_blob_array_field(field) && source_field.is_some_and(is_blob_array_field);
         let scalar_blob = is_blob_field(field) && source_field.is_some_and(is_blob_field);
         if array || scalar_blob {
+            let source_name = source_name.expect("media projection has a dataset source");
             media_projections.push(media_projection(
                 field,
                 source_field_ids[source_name],
@@ -156,18 +154,22 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_blob_alias_collisions() {
+    fn ignores_unproven_blob_aliases() {
         let blob =
             Field::new("blob", DataType::LargeBinary, true).with_metadata(HashMap::from([(
                 "ARROW:extension:name".to_string(),
                 BLOB_EXTENSION.to_string(),
             )]));
-        let result = Schema::new(vec![Field::new("blob", DataType::Int32, false)]);
+        let result = Schema::new(vec![Field::new(
+            "blob",
+            DataType::Struct(BLOB_V2_DESC_FIELDS.clone()),
+            true,
+        )]);
 
         let columns = sql_columns(
             &result,
             &Schema::new(vec![blob]),
-            &[None],
+            &[],
             &HashMap::from([("blob".to_string(), 3)]),
         );
 

@@ -14,6 +14,14 @@ use axum::{
     http::StatusCode,
 };
 use datafusion_expr::{Expr, LogicalPlan};
+use datafusion_sql::sqlparser::{
+    ast::{
+        Expr as SqlExpr, GroupByExpr, Ident, OrderByKind, SelectItem, SetExpr,
+        Statement as SqlStatement, TableFactor,
+    },
+    dialect::GenericDialect,
+    parser::Parser,
+};
 use futures::{StreamExt, TryStreamExt};
 use lance::dataset::sql::SqlQuery;
 use lance_core::datatypes::BlobHandling;
@@ -135,16 +143,30 @@ async fn create_sql_cursor(
     sql: &str,
 ) -> Result<SqlCursorResponse> {
     let sql = read_only_sql(sql)?;
-    let query = connection
-        .dataset
-        .sql(sql)
-        .with_row_addr(true)
-        .blob_handling(BlobHandling::BlobsDescriptions)
-        .build()
-        .await
-        .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?;
+    let prepared = prepare_sql_with_row_addr(sql);
+    let (query, media_safe) = match prepared.as_deref() {
+        Some(prepared) => match build_sql_query(connection, prepared).await {
+            Ok(query) => (query, true),
+            Err(_) => (
+                build_sql_query(connection, sql)
+                    .await
+                    .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
+                false,
+            ),
+        },
+        None => (
+            build_sql_query(connection, sql)
+                .await
+                .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
+            false,
+        ),
+    };
     let dataframe = query.into_dataframe();
-    let source_names = direct_projection_sources(dataframe.logical_plan());
+    let source_names = if media_safe {
+        direct_projection_sources(dataframe.logical_plan())
+    } else {
+        Vec::new()
+    };
     let query = SqlQuery::new(dataframe);
     let record_stream = query.into_stream().await?;
     let result_schema = record_stream.schema();
@@ -188,6 +210,16 @@ async fn create_sql_cursor(
         columns: columns.scalar,
         media_columns,
     })
+}
+
+async fn build_sql_query(connection: &ConnectedDataset, sql: &str) -> lance_core::Result<SqlQuery> {
+    connection
+        .dataset
+        .sql(sql)
+        .with_row_addr(true)
+        .blob_handling(BlobHandling::BlobsDescriptions)
+        .build()
+        .await
 }
 
 pub(crate) async fn sql_page(
@@ -320,6 +352,106 @@ fn read_only_sql(sql: &str) -> Result<&str> {
     Ok(sql)
 }
 
+fn prepare_sql_with_row_addr(sql: &str) -> Option<String> {
+    let [mut statement] = Parser::parse_sql(&GenericDialect, sql)
+        .ok()?
+        .try_into()
+        .ok()?;
+    let SqlStatement::Query(query) = &mut statement else {
+        return None;
+    };
+    if query.with.is_some() {
+        return None;
+    }
+    let order_by_is_safe = query
+        .order_by
+        .as_ref()
+        .is_none_or(|order_by| match &order_by.kind {
+            OrderByKind::All(_) => false,
+            OrderByKind::Expressions(expressions) => expressions
+                .iter()
+                .all(|expression| is_direct_column(&expression.expr)),
+        });
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return None;
+    };
+    let GroupByExpr::Expressions(group_by, modifiers) = &select.group_by else {
+        return None;
+    };
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    let TableFactor::Table {
+        name, alias, args, ..
+    } = &from.relation
+    else {
+        return None;
+    };
+    if !name.to_string().eq_ignore_ascii_case("dataset")
+        || args.is_some()
+        || alias
+            .as_ref()
+            .is_some_and(|alias| !alias.columns.is_empty())
+        || !from.joins.is_empty()
+        || select.distinct.is_some()
+        || !order_by_is_safe
+        || !group_by.is_empty()
+        || !modifiers.is_empty()
+        || select.having.is_some()
+        || select.qualify.is_some()
+        || !select.named_window.is_empty()
+    {
+        return None;
+    }
+
+    let mut has_row_addr = false;
+    for item in &select.projection {
+        match item {
+            SelectItem::Wildcard(options) | SelectItem::QualifiedWildcard(_, options)
+                if options.to_string().is_empty() =>
+            {
+                has_row_addr = true;
+            }
+            SelectItem::UnnamedExpr(expression) if is_direct_column(expression) => {
+                has_row_addr |= is_row_addr(expression);
+            }
+            SelectItem::ExprWithAlias { expr, alias } if is_direct_column(expr) => {
+                if alias.value.eq_ignore_ascii_case("_rowaddr") && !is_row_addr(expr) {
+                    return None;
+                }
+                has_row_addr |= is_row_addr(expr) && alias.value.eq_ignore_ascii_case("_rowaddr");
+            }
+            _ => return None,
+        }
+    }
+    if !has_row_addr {
+        select
+            .projection
+            .push(SelectItem::UnnamedExpr(SqlExpr::Identifier(Ident::new(
+                "_rowaddr",
+            ))));
+    }
+    Some(statement.to_string())
+}
+
+fn is_direct_column(expression: &SqlExpr) -> bool {
+    matches!(
+        expression,
+        SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_)
+    )
+}
+
+fn is_row_addr(expression: &SqlExpr) -> bool {
+    match expression {
+        SqlExpr::Identifier(identifier) => identifier.value.eq_ignore_ascii_case("_rowaddr"),
+        SqlExpr::CompoundIdentifier(identifiers) => identifiers
+            .last()
+            .is_some_and(|identifier| identifier.value.eq_ignore_ascii_case("_rowaddr")),
+        SqlExpr::Nested(expression) => is_row_addr(expression),
+        _ => false,
+    }
+}
+
 fn direct_projection_sources(plan: &LogicalPlan) -> Vec<Option<String>> {
     match plan {
         LogicalPlan::Projection(projection) => {
@@ -405,6 +537,32 @@ mod tests {
         assert!(read_only_sql("DELETE FROM dataset").is_err());
         assert!(read_only_sql("CREATE EXTERNAL TABLE secret").is_err());
         assert!(read_only_sql("  ").is_err());
+    }
+
+    #[test]
+    fn prepares_only_simple_row_address_queries() {
+        let prepared = prepare_sql_with_row_addr(
+            "SELECT blob AS preview FROM dataset WHERE id > 0 ORDER BY id LIMIT 10",
+        )
+        .unwrap();
+        assert!(prepared.contains("blob AS preview"));
+        assert!(prepared.contains("_rowaddr"));
+        assert!(prepare_sql_with_row_addr("SELECT * FROM dataset").is_some());
+        assert!(prepare_sql_with_row_addr("SELECT blob, _rowaddr FROM dataset").is_some());
+
+        for sql in [
+            "SELECT DISTINCT blob FROM dataset",
+            "SELECT max(blob) FROM dataset",
+            "SELECT blob FROM dataset GROUP BY blob",
+            "SELECT left.blob FROM dataset left JOIN dataset right ON true",
+            "SELECT blob FROM dataset UNION ALL SELECT blob FROM dataset",
+            "WITH selected AS (SELECT blob FROM dataset) SELECT blob FROM selected",
+            "SELECT blob FROM (SELECT blob FROM dataset) nested",
+            "SELECT (SELECT blob FROM dataset LIMIT 1) AS blob FROM dataset",
+            "SELECT blob, 0 AS _rowaddr FROM dataset",
+        ] {
+            assert!(prepare_sql_with_row_addr(sql).is_none(), "{sql}");
+        }
     }
 
     #[test]
@@ -498,7 +656,7 @@ mod tests {
             &state,
             connection_id,
             &connection,
-            "SELECT blob AS preview, _rowaddr FROM dataset",
+            "SELECT blob AS preview FROM dataset",
         )
         .await
         .unwrap();
@@ -519,6 +677,7 @@ mod tests {
         .unwrap();
 
         assert!(page.rows[0].values.get("preview").is_none());
+        assert!(page.rows[0].values.get("_rowaddr").is_some());
         assert!(page.rows[0].media["preview"][0].is_empty());
         assert!(page.rows[1].media.is_empty());
 
