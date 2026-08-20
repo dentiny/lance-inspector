@@ -17,9 +17,13 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use axum::{
     Router,
+    http::{HeaderValue, header::CACHE_CONTROL},
     routing::{get, post},
 };
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+};
 
 use api::AppState;
 
@@ -70,9 +74,14 @@ async fn main() -> Result<()> {
 
     let index = args.ui_dir.join("index.html");
     let static_files = ServeDir::new(&args.ui_dir).not_found_service(ServeFile::new(index));
-    let app = Router::new()
-        .nest("/api", api)
-        .fallback_service(static_files);
+    let static_files =
+        Router::new()
+            .fallback_service(static_files)
+            .layer(SetResponseHeaderLayer::overriding(
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-cache"),
+            ));
+    let app = Router::new().nest("/api", api).merge(static_files);
     #[cfg(all(feature = "profiling", unix))]
     let app = app.merge(profiler::routes());
 

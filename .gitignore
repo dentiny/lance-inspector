@@ -16,6 +16,7 @@ target
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
 frontend/*.tsbuildinfo
 .DS_Store
 
