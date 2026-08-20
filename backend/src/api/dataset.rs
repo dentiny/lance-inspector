@@ -18,10 +18,7 @@ use crate::models::{
 use super::{
     error::ApiError,
     schema::is_blob_field,
-    state::{
-        AppState, ConnectedDataset, ConnectionQuery, DiscoveryEntry, SessionEntry, connected,
-        discovered,
-    },
+    state::{AppState, ConnectionQuery, DiscoveryEntry, SessionEntry, connected, discovered},
 };
 
 // Maximum number of deleted row offsets included in the UI preview.
@@ -147,7 +144,7 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectRes
     };
     let dataset = resolve_reference(root, reference).await?;
     let dataset_info = Arc::new(build_dataset_info(&dataset, &uri, reference).await?);
-    let connection = ConnectedDataset::new(dataset, dataset_info.clone());
+    let connection = state.connected_dataset(dataset, dataset_info.clone());
     let connection_id = Uuid::new_v4();
     state
         .connections

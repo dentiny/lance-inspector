@@ -28,7 +28,7 @@ const MAX_CONNECTIONS: usize = 256;
 const MAX_DISCOVERIES: usize = 256;
 // Maximum active SQL cursors retained in memory.
 const MAX_QUERY_CURSORS: usize = 256;
-// Maximum materialized Blob-array rows retained per connection. This is
+// Maximum materialized Blob-array rows retained server-wide. This is
 // deliberately small; bounding this cache by bytes is a follow-up.
 const MAX_BLOB_ARRAY_ROWS: usize = 8;
 // Dataset sessions expire after this period without access.
@@ -38,13 +38,14 @@ const DISCOVERY_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 // SQL cursors expire after this period without access.
 pub(super) const QUERY_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 
-type BlobArrayKey = (String, u64);
+type BlobArrayKey = (Uuid, String, u64);
 type BlobArraySlot = Arc<OnceCell<ArrayRef>>;
 
 pub(crate) struct AppState {
     pub(super) connections: BoundedCache<Uuid, SessionEntry>,
     pub(super) discoveries: BoundedCache<Uuid, DiscoveryEntry>,
     pub(super) queries: BoundedCache<Uuid, Arc<AsyncMutex<QueryCursor>>>,
+    blob_arrays: Arc<BoundedCache<BlobArrayKey, BlobArraySlot>>,
 }
 
 impl AppState {
@@ -53,7 +54,16 @@ impl AppState {
             connections: BoundedCache::new(MAX_CONNECTIONS),
             discoveries: BoundedCache::new(MAX_DISCOVERIES),
             queries: BoundedCache::new(MAX_QUERY_CURSORS),
+            blob_arrays: Arc::new(BoundedCache::new(MAX_BLOB_ARRAY_ROWS)),
         }
+    }
+
+    pub(super) fn connected_dataset(
+        &self,
+        dataset: Arc<Dataset>,
+        info: Arc<DatasetInfo>,
+    ) -> ConnectedDataset {
+        ConnectedDataset::with_blob_cache(dataset, info, self.blob_arrays.clone())
     }
 }
 
@@ -106,23 +116,38 @@ impl SessionEntry {
 pub(super) struct ConnectedDataset {
     pub(super) dataset: Arc<Dataset>,
     pub(super) info: Arc<DatasetInfo>,
+    blob_cache_namespace: Uuid,
     blob_arrays: Arc<BoundedCache<BlobArrayKey, BlobArraySlot>>,
 }
 
 impl ConnectedDataset {
+    #[cfg(test)]
     pub(super) fn new(dataset: Arc<Dataset>, info: Arc<DatasetInfo>) -> Self {
+        Self::with_blob_cache(
+            dataset,
+            info,
+            Arc::new(BoundedCache::new(MAX_BLOB_ARRAY_ROWS)),
+        )
+    }
+
+    fn with_blob_cache(
+        dataset: Arc<Dataset>,
+        info: Arc<DatasetInfo>,
+        blob_arrays: Arc<BoundedCache<BlobArrayKey, BlobArraySlot>>,
+    ) -> Self {
         Self {
             dataset,
             info,
-            blob_arrays: Arc::new(BoundedCache::new(MAX_BLOB_ARRAY_ROWS)),
+            blob_cache_namespace: Uuid::new_v4(),
+            blob_arrays,
         }
     }
 
     pub(super) fn blob_array_slot(&self, column: &str, row_address: u64) -> BlobArraySlot {
-        self.blob_arrays
-            .get_or_insert_with((column.to_string(), row_address), || {
-                Arc::new(OnceCell::new())
-            })
+        self.blob_arrays.get_or_insert_with(
+            (self.blob_cache_namespace, column.to_string(), row_address),
+            || Arc::new(OnceCell::new()),
+        )
     }
 }
 
@@ -222,14 +247,34 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        state.connections.insert(
-            first_id,
-            SessionEntry::new(ConnectedDataset::new(dataset.clone(), first_info)),
-        );
-        state.connections.insert(
-            second_id,
-            SessionEntry::new(ConnectedDataset::new(dataset, second_info)),
-        );
+        let first_connection = state.connected_dataset(dataset.clone(), first_info.clone());
+        let second_connection = state.connected_dataset(dataset.clone(), second_info.clone());
+        let first_slot = first_connection.blob_array_slot("blob", 7);
+        assert!(Arc::ptr_eq(
+            &first_slot,
+            &first_connection.clone().blob_array_slot("blob", 7)
+        ));
+        assert!(!Arc::ptr_eq(
+            &first_slot,
+            &second_connection.blob_array_slot("blob", 7)
+        ));
+
+        for _ in 0..7 {
+            state
+                .connected_dataset(dataset.clone(), first_info.clone())
+                .blob_array_slot("blob", 7);
+        }
+        assert!(!Arc::ptr_eq(
+            &first_slot,
+            &first_connection.blob_array_slot("blob", 7)
+        ));
+
+        state
+            .connections
+            .insert(first_id, SessionEntry::new(first_connection));
+        state
+            .connections
+            .insert(second_id, SessionEntry::new(second_connection));
 
         assert_eq!(
             connected(&state, first_id).unwrap().info.uri,
