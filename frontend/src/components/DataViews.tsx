@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { Activity, Braces, CircleAlert, FileArchive, GitBranch, RefreshCw } from 'lucide-react'
+import { Activity, Braces, FileArchive, GitBranch } from 'lucide-react'
 import { connectedUrl, useJsonResource } from '../api'
 import { formatBytes } from '../format'
 import type { DatasetInfo, FileEntry, RowsResponse, TransactionInfo } from '../types'
-import { DeletionGrid, StatCard } from './DatasetWidgets'
+import { AsyncStatus, PageHeading } from '../ui'
+import { DeletionGrid } from './DeletionGrid'
 import { RowsTable } from './RowsTable'
+import { StatCard } from './StatCard'
 
 function RecordFields({
   record,
@@ -34,10 +36,12 @@ function RecordFields({
 function ManifestView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
   return (
     <div className="page">
-      <div className="page-heading">
-        <div><span className="eyebrow">Decoded protobuf</span><h1>Manifest</h1><p>{file.path}</p></div>
-        <span className="count-badge">{formatBytes(file.size)}</span>
-      </div>
+      <PageHeading
+        eyebrow="Decoded protobuf"
+        title="Manifest"
+        subtitle={file.path}
+        badge={<span className="count-badge">{formatBytes(file.size)}</span>}
+      />
       <section className="panel"><RecordFields record={info.manifest} /></section>
     </div>
   )
@@ -61,8 +65,7 @@ function RowsPanel({
         <div><span className="eyebrow">Live dataset scan</span><h2>{title}</h2></div>
         {data && <span className="count-badge">{offset + 1}–{Math.min(offset + data.rows.length, data.total)} of {data.total}</span>}
       </div>
-      {error && <div className="error-state"><CircleAlert />{error}</div>}
-      {!data && !error && <div className="loading-state"><RefreshCw className="spin" />Scanning Lance rows…</div>}
+      {(error || !data) && <AsyncStatus error={error} loading="Scanning Lance rows…" />}
       {data && (
         <>
           <RowsTable data={data} connectionId={connectionId} />
@@ -81,10 +84,12 @@ function DataView({ info, file, connectionId }: { info: DatasetInfo; file: FileE
   const fragment = info.fragments.find((item) => item.files.some((candidate) => candidate.path === file.path))
   return (
     <div className="page wide-page">
-      <div className="page-heading">
-        <div><span className="eyebrow">Data file · first 20 rows</span><h1>{file.path.split('/').at(-1)}</h1><p>{file.path}</p></div>
-        <span className="count-badge">{formatBytes(file.size)}</span>
-      </div>
+      <PageHeading
+        eyebrow="Data file · first 20 rows"
+        title={file.path.split('/').at(-1)}
+        subtitle={file.path}
+        badge={<span className="count-badge">{formatBytes(file.size)}</span>}
+      />
       {fragment?.deletion && <DeletionGrid fragment={fragment} />}
       <RowsPanel key={file.path} connectionId={connectionId} />
     </div>
@@ -95,9 +100,7 @@ function DeletionFileView({ info, file }: { info: DatasetInfo; file: FileEntry }
   const fragment = info.fragments.find((item) => item.deletion?.path === file.path)
   return (
     <div className="page">
-      <div className="page-heading">
-        <div><span className="eyebrow">Physical tombstones</span><h1>Deletion vector</h1><p>{file.path}</p></div>
-      </div>
+      <PageHeading eyebrow="Physical tombstones" title="Deletion vector" subtitle={file.path} />
       {fragment ? <DeletionGrid fragment={fragment} /> : <div className="empty-state">This deletion file is not referenced by the active manifest.</div>}
     </div>
   )
@@ -110,12 +113,13 @@ function TransactionFileView({ file, connectionId }: { file: FileEntry; connecti
 
   return (
     <div className="page">
-      <div className="page-heading">
-        <div><span className="eyebrow">Decoded protobuf</span><h1>Transaction</h1><p>{file.path}</p></div>
-        {transaction && <span className="count-badge">{transaction.operation_type}</span>}
-      </div>
-      {error && <div className="error-state"><CircleAlert />{error}</div>}
-      {!transaction && !error && <div className="loading-state"><RefreshCw className="spin" />Decoding transaction…</div>}
+      <PageHeading
+        eyebrow="Decoded protobuf"
+        title="Transaction"
+        subtitle={file.path}
+        badge={transaction && <span className="count-badge">{transaction.operation_type}</span>}
+      />
+      {(error || !transaction) && <AsyncStatus error={error} loading="Decoding transaction…" />}
       {transaction && (
         <>
           <div className="stats-grid transaction-stats">
@@ -148,12 +152,13 @@ function RawFileView({ file, connectionId }: { file: FileEntry; connectionId: st
   }>(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId))
   return (
     <div className="page">
-      <div className="page-heading">
-        <div><span className="eyebrow">{file.kind} file</span><h1>{file.path.split('/').at(-1)}</h1><p>{file.path}</p></div>
-        <span className="count-badge">{formatBytes(file.size)}</span>
-      </div>
-      {error && <div className="error-state"><CircleAlert />{error}</div>}
-      {!preview && !error && <div className="loading-state"><RefreshCw className="spin" />Reading file…</div>}
+      <PageHeading
+        eyebrow={`${file.kind} file`}
+        title={file.path.split('/').at(-1)}
+        subtitle={file.path}
+        badge={<span className="count-badge">{formatBytes(file.size)}</span>}
+      />
+      {(error || !preview) && <AsyncStatus error={error} loading="Reading file…" />}
       {preview && (
         <section className="panel raw-panel">
           <div className="panel-title"><h2>{preview.format === 'hex' ? 'Hex preview' : 'Text preview'}</h2>{preview.truncated && <span className="count-badge">first 64 KB</span>}</div>

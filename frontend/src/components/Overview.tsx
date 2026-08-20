@@ -1,8 +1,9 @@
 import { Activity, GitBranch, HardDrive, Layers3, Rows3 } from 'lucide-react'
 import { formatBytes } from '../format'
 import type { DatasetInfo, ReferenceCatalog } from '../types'
+import { PageHeading } from '../ui'
 import { DatasetStructure } from './DatasetStructure'
-import { StatCard } from './DatasetWidgets'
+import { StatCard } from './StatCard'
 
 export function Overview({ info, catalog }: { info: DatasetInfo; catalog?: ReferenceCatalog }) {
   const deletionCount = info.fragments.reduce((total, fragment) => total + (fragment.deletion?.count ?? 0), 0)
@@ -11,14 +12,12 @@ export function Overview({ info, catalog }: { info: DatasetInfo; catalog?: Refer
   const branches = catalog?.branches.filter((branch) => branch.name !== 'main') ?? []
   return (
     <div className="page">
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">Dataset overview</span>
-          <h1>Storage anatomy</h1>
-          <p>Version, schema, fragments, and physical layout of the mounted Lance dataset.</p>
-        </div>
-        <span className="read-only"><Activity size={14} /> read only</span>
-      </div>
+      <PageHeading
+        eyebrow="Dataset overview"
+        title="Storage anatomy"
+        subtitle="Version, schema, fragments, and physical layout of the mounted Lance dataset."
+        badge={<span className="read-only"><Activity size={14} /> read only</span>}
+      />
       <div className="stats-grid">
         <StatCard icon={<Rows3 />} label="Visible rows" value={info.rows.toLocaleString()} detail={`${deletionCount} physically deleted`} />
         <StatCard icon={<Layers3 />} label="Fragments" value={info.fragments.length} detail={`${info.schema.length} top-level fields`} />

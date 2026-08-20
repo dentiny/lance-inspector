@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowRight, CircleAlert, RefreshCw } from 'lucide-react'
 import { connectedUrl, HttpError, requestJson } from '../api'
 import type { DatasetInfo, SqlCursorResponse, SqlPageResponse, TableData } from '../types'
+import { PageHeading } from '../ui'
 import { DatasetStructure } from './DatasetStructure'
 import { RowsTable } from './RowsTable'
 
@@ -233,14 +234,12 @@ export function DatasetQueryView({
 }) {
   return (
     <div className="page wide-page user-data-page">
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">{mode === 'infra' ? 'Infra mode · read-only SQL' : 'User mode · selected snapshot'}</span>
-          <h1>{mode === 'infra' ? 'Query dataset' : 'Dataset data'}</h1>
-          <p>{info.uri}</p>
-        </div>
-        <span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>
-      </div>
+      <PageHeading
+        eyebrow={mode === 'infra' ? 'Infra mode · read-only SQL' : 'User mode · selected snapshot'}
+        title={mode === 'infra' ? 'Query dataset' : 'Dataset data'}
+        subtitle={info.uri}
+        badge={<span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>}
+      />
       <SqlQueryView connectionId={connectionId} />
       <DatasetStructure info={info} />
     </div>
