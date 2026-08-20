@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use anyhow::{Result, anyhow};
 use arrow_array::RecordBatch;
@@ -197,7 +193,7 @@ async fn create_sql_cursor(
             stream: record_stream,
             scalar_indices: columns.scalar_indices,
             media_projections: columns.media_projections,
-            pending_rows: VecDeque::new(),
+            pending_batch: None,
             next_sequence: 0,
             rows_returned: 0,
             last_page: None,
@@ -267,29 +263,34 @@ async fn read_sql_page(
     let page_size = SQL_PAGE_ROWS.min(remaining);
     let mut rows = Vec::with_capacity(page_size);
     while rows.len() < page_size {
-        if let Some(row) = cursor.pending_rows.pop_front() {
-            rows.push(row);
+        if let Some(batch) = cursor.pending_batch.take() {
+            let take = (page_size - rows.len()).min(batch.num_rows());
+            let page_batch = batch.slice(0, take);
+            if take < batch.num_rows() {
+                cursor.pending_batch = Some(batch.slice(take, batch.num_rows() - take));
+            }
+            let serialized = serialize_rows(
+                &page_batch,
+                &cursor.scalar_indices,
+                &cursor.media_projections,
+            )
+            .map_err(|error| QueryExecutionFailed(error.to_string()));
+            match serialized {
+                Ok(serialized) => rows.extend(serialized),
+                Err(error) => {
+                    cursor.done = true;
+                    drop(cursor);
+                    state.queries.remove(&cursor_id);
+                    return Err(error.into());
+                }
+            }
             continue;
         }
         if cursor.done {
             break;
         }
-        let scalar_indices = cursor.scalar_indices.clone();
-        let media_projections = cursor.media_projections.clone();
         match cursor.stream.next().await {
-            Some(Ok(batch)) => {
-                let rows = serialize_rows(&batch, &scalar_indices, &media_projections)
-                    .map_err(|error| QueryExecutionFailed(error.to_string()));
-                match rows {
-                    Ok(rows) => cursor.pending_rows.extend(rows),
-                    Err(error) => {
-                        cursor.done = true;
-                        drop(cursor);
-                        state.queries.remove(&cursor_id);
-                        return Err(error.into());
-                    }
-                }
-            }
+            Some(Ok(batch)) => cursor.pending_batch = Some(batch),
             Some(Err(error)) => {
                 let error = QueryExecutionFailed(error.to_string());
                 cursor.done = true;
@@ -303,9 +304,10 @@ async fn read_sql_page(
 
     cursor.rows_returned += rows.len();
     let capped = cursor.rows_returned >= MAX_SQL_RESULT_ROWS;
-    let done = capped || (cursor.done && cursor.pending_rows.is_empty());
+    let done = capped || (cursor.done && cursor.pending_batch.is_none());
     if capped {
         cursor.done = true;
+        cursor.pending_batch = None;
     }
     let page = SqlPageResponse {
         sequence: query.sequence,
@@ -603,12 +605,22 @@ mod tests {
             },
         };
 
-        let rows = serialize_rows(&batch, &[0, 2], &[projection]).unwrap();
+        let rows = serialize_rows(&batch, &[0, 2], std::slice::from_ref(&projection)).unwrap();
 
         assert_eq!(rows[0].values["value"], 1);
         assert!(rows[0].values.get("blob").is_none());
         assert!(rows[0].media["blob"][0].is_empty());
         assert!(rows[1].media.is_empty());
+
+        let sliced = serialize_rows(
+            &batch.slice(1, 1),
+            &[0, 2],
+            std::slice::from_ref(&projection),
+        )
+        .unwrap();
+        assert_eq!(sliced[0].values["value"], 2);
+        assert_eq!(sliced[0].values["_rowaddr"], 11);
+        assert!(sliced[0].media.is_empty());
     }
 
     #[tokio::test]
@@ -773,6 +785,15 @@ mod tests {
         )
         .await
         .unwrap();
+        let pending_after_first = state
+            .queries
+            .get(&started.cursor_id)
+            .unwrap()
+            .lock()
+            .await
+            .pending_batch
+            .as_ref()
+            .map(RecordBatch::num_rows);
         let retry = read_sql_page(
             &state,
             started.cursor_id,
@@ -784,6 +805,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(first, retry);
+        let pending_after_retry = state
+            .queries
+            .get(&started.cursor_id)
+            .unwrap()
+            .lock()
+            .await
+            .pending_batch
+            .as_ref()
+            .map(RecordBatch::num_rows);
+        assert_eq!(pending_after_first, pending_after_retry);
         assert_eq!(first.rows.len(), SQL_PAGE_ROWS);
         assert!(!first.done);
 
@@ -811,5 +842,11 @@ mod tests {
         assert_eq!(last.rows.len(), 5);
         assert!(last.done);
         assert!(!last.truncated);
+        let values = [first, second, last]
+            .into_iter()
+            .flat_map(|page| page.rows)
+            .map(|row| row.values["value"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, (0..45).collect::<Vec<_>>());
     }
 }

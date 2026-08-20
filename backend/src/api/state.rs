@@ -1,11 +1,10 @@
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
-use arrow_array::ArrayRef;
+use arrow_array::{ArrayRef, RecordBatch};
 use datafusion_execution::SendableRecordBatchStream;
 use lance::Dataset;
 use serde::Deserialize;
@@ -14,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     cache::BoundedCache,
-    models::{DatasetInfo, FileEntry, FilesPage, RowView, SqlPageResponse},
+    models::{DatasetInfo, FileEntry, FilesPage, SqlPageResponse},
 };
 
 use super::{
@@ -164,7 +163,7 @@ pub(super) struct QueryCursor {
     pub(super) stream: SendableRecordBatchStream,
     pub(super) scalar_indices: Vec<usize>,
     pub(super) media_projections: Vec<MediaProjection>,
-    pub(super) pending_rows: VecDeque<RowView>,
+    pub(super) pending_batch: Option<RecordBatch>,
     pub(super) next_sequence: u64,
     pub(super) rows_returned: usize,
     pub(super) last_page: Option<SqlPageResponse>,

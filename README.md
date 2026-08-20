@@ -187,11 +187,11 @@ The query lifecycle is:
 4. `POST /api/sql/:cursor_id/cancel` releases the stream when a query is
    replaced, its snapshot changes, or its view is closed.
 
-This bounds application-layer work to the current Arrow batch, pending rows,
-and one cached response rather than collecting the complete result. It does not
-change SQL operator semantics: `ORDER BY`, joins, and aggregations may still
-need DataFusion to read or materialize substantial intermediate state before
-the first page is available.
+This bounds application-layer work to the unconsumed slice of the current Arrow
+batch and one cached response rather than collecting the complete result. It
+does not change SQL operator semantics: `ORDER BY`, joins, and aggregations may
+still need DataFusion to read or materialize substantial intermediate state
+before the first page is available.
 
 #### Cursor failure handling
 
