@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Tag,
 } from 'lucide-react'
+import { errorMessage, requestJson } from '../api'
 import type { ConnectedDataset, ReferenceCatalog } from '../types'
 
 export function DatasetConnector({
@@ -30,18 +31,13 @@ export function DatasetConnector({
     if (!location) return
     setDiscovering(true)
     setError('')
-    fetch('/api/dataset/references', {
+    requestJson<ReferenceCatalog>('/api/dataset/references', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uri: location }),
     })
-      .then(async (response) => {
-        const body = await response.json()
-        if (!response.ok) throw new Error(body.error ?? response.statusText)
-        return body as ReferenceCatalog
-      })
       .then(onDiscovered)
-      .catch((reason: Error) => setError(reason.message))
+      .catch((reason: unknown) => setError(errorMessage(reason)))
       .finally(() => setDiscovering(false))
   }
 
@@ -236,18 +232,13 @@ export function ReferenceBrowser({
   const select = (reference: string) => {
     setConnecting(reference)
     setError('')
-    fetch('/api/dataset/connect', {
+    requestJson<ConnectedDataset>('/api/dataset/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ discovery_id: catalog.discovery_id, reference }),
     })
-      .then(async (response) => {
-        const body = await response.json()
-        if (!response.ok) throw new Error(body.error ?? response.statusText)
-        return body as ConnectedDataset
-      })
       .then(onConnected)
-      .catch((reason: Error) => setError(reason.message))
+      .catch((reason: unknown) => setError(errorMessage(reason)))
       .finally(() => setConnecting(''))
   }
 

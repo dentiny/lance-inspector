@@ -1,10 +1,35 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Activity, Braces, CircleAlert, FileArchive, GitBranch, RefreshCw } from 'lucide-react'
-import { connectedUrl, requireOk } from '../api'
+import { connectedUrl, useJsonResource } from '../api'
 import { formatBytes } from '../format'
 import type { DatasetInfo, FileEntry, RowsResponse, TransactionInfo } from '../types'
 import { DeletionGrid, StatCard } from './DatasetWidgets'
 import { RowsTable } from './RowsTable'
+
+function RecordFields({
+  record,
+  preformatted,
+  emptyAsNull = false,
+}: {
+  record: Record<string, unknown>
+  preformatted?: string
+  emptyAsNull?: boolean
+}) {
+  return (
+    <div className={`record-fields${preformatted ? ' scroll-record-values' : ''}`}>
+      {Object.entries(record).map(([key, value]) => (
+        <div className="record-field" key={key}>
+          <span>{key.replaceAll('_', ' ')}</span>
+          {typeof value === 'object' && value !== null
+            ? <pre>{JSON.stringify(value, null, 2)}</pre>
+            : key === preformatted
+              ? <pre>{String(value)}</pre>
+              : <strong>{value == null || (emptyAsNull && value === '') ? '—' : String(value)}</strong>}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 function ManifestView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
   return (
@@ -13,16 +38,7 @@ function ManifestView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
         <div><span className="eyebrow">Decoded protobuf</span><h1>Manifest</h1><p>{file.path}</p></div>
         <span className="count-badge">{formatBytes(file.size)}</span>
       </div>
-      <section className="panel manifest-grid">
-        {Object.entries(info.manifest).map(([key, value]) => (
-          <div className="manifest-field" key={key}>
-            <span>{key.replaceAll('_', ' ')}</span>
-            {typeof value === 'object' && value !== null
-              ? <pre>{JSON.stringify(value, null, 2)}</pre>
-              : <strong>{value == null ? '—' : String(value)}</strong>}
-          </div>
-        ))}
-      </section>
+      <section className="panel"><RecordFields record={info.manifest} /></section>
     </div>
   )
 }
@@ -34,27 +50,10 @@ function RowsPanel({
   connectionId: string
   title?: string
 }) {
-  const [data, setData] = useState<RowsResponse>()
   const [offset, setOffset] = useState(0)
-  const [error, setError] = useState('')
-  useEffect(() => {
-    const controller = new AbortController()
-    setData(undefined)
-    setError('')
-    fetch(connectedUrl(`/api/rows?offset=${offset}&limit=20`, connectionId), {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        await requireOk(response)
-        return response.json() as Promise<RowsResponse>
-      })
-      .then(setData)
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setError(reason instanceof Error ? reason.message : String(reason))
-      })
-    return () => controller.abort()
-  }, [connectionId, offset])
+  const { data, error } = useJsonResource<RowsResponse>(
+    connectedUrl(`/api/rows?offset=${offset}&limit=20`, connectionId),
+  )
 
   return (
     <section className="panel data-panel">
@@ -105,26 +104,9 @@ function DeletionFileView({ info, file }: { info: DatasetInfo; file: FileEntry }
 }
 
 function TransactionFileView({ file, connectionId }: { file: FileEntry; connectionId: string }) {
-  const [transaction, setTransaction] = useState<TransactionInfo>()
-  const [error, setError] = useState('')
-  useEffect(() => {
-    const controller = new AbortController()
-    setTransaction(undefined)
-    setError('')
-    fetch(connectedUrl(`/api/transaction?path=${encodeURIComponent(file.path)}`, connectionId), {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        await requireOk(response)
-        return response.json() as Promise<TransactionInfo>
-      })
-      .then(setTransaction)
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setError(reason instanceof Error ? reason.message : String(reason))
-      })
-    return () => controller.abort()
-  }, [connectionId, file.path])
+  const { data: transaction, error } = useJsonResource<TransactionInfo>(
+    connectedUrl(`/api/transaction?path=${encodeURIComponent(file.path)}`, connectionId),
+  )
 
   return (
     <div className="page">
@@ -144,27 +126,12 @@ function TransactionFileView({ file, connectionId }: { file: FileEntry; connecti
           </div>
           <section className="panel">
             <div className="panel-title"><div><span className="eyebrow">Operation payload</span><h2>{transaction.operation_type}</h2></div></div>
-            <div className="transaction-fields">
-              {Object.entries(transaction.operation).map(([key, value]) => (
-                <div className="transaction-field" key={key}>
-                  <span>{key.replaceAll('_', ' ')}</span>
-                  {typeof value === 'object' && value !== null
-                    ? <pre>{JSON.stringify(value, null, 2)}</pre>
-                    : key === 'details'
-                      ? <pre>{String(value)}</pre>
-                      : <strong>{value == null || value === '' ? '—' : String(value)}</strong>}
-                </div>
-              ))}
-            </div>
+            <RecordFields record={transaction.operation} preformatted="details" emptyAsNull />
           </section>
           {Object.keys(transaction.properties).length > 0 && (
             <section className="panel">
               <div className="panel-title"><div><span className="eyebrow">Commit metadata</span><h2>Properties</h2></div></div>
-              <div className="transaction-fields">
-                {Object.entries(transaction.properties).map(([key, value]) => (
-                  <div className="transaction-field" key={key}><span>{key}</span><strong>{value}</strong></div>
-                ))}
-              </div>
+              <RecordFields record={transaction.properties} />
             </section>
           )}
         </>
@@ -174,26 +141,11 @@ function TransactionFileView({ file, connectionId }: { file: FileEntry; connecti
 }
 
 function RawFileView({ file, connectionId }: { file: FileEntry; connectionId: string }) {
-  const [preview, setPreview] = useState<{ content: string; format: string; truncated: boolean }>()
-  const [error, setError] = useState('')
-  useEffect(() => {
-    const controller = new AbortController()
-    setPreview(undefined)
-    setError('')
-    fetch(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId), {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        await requireOk(response)
-        return response.json()
-      })
-      .then(setPreview)
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setError(reason instanceof Error ? reason.message : String(reason))
-      })
-    return () => controller.abort()
-  }, [connectionId, file.path])
+  const { data: preview, error } = useJsonResource<{
+    content: string
+    format: string
+    truncated: boolean
+  }>(connectedUrl(`/api/file?path=${encodeURIComponent(file.path)}`, connectionId))
   return (
     <div className="page">
       <div className="page-heading">

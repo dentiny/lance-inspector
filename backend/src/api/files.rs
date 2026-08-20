@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::models::{FileEntry, FilePreview, FilesPage, TransactionView};
 
 use super::{
-    error::{ApiError, InvalidRequest},
+    error::{ApiError, RequestError::InvalidRequest},
     state::{AppState, ConnectedDataset, FileListing, connected, connected_session},
 };
 
@@ -31,7 +31,7 @@ pub(crate) async fn files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FilesQuery>,
 ) -> Result<Json<FilesPage>, ApiError> {
-    files_page(state, query).await.map(Json).map_err(ApiError)
+    Ok(Json(files_page(state, query).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,11 +182,8 @@ pub(crate) async fn file_preview(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FilePreview>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    read_file_preview(&connection, &query.path)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let connection = connected(&state, query.connection_id)?;
+    Ok(Json(read_file_preview(&connection, &query.path).await?))
 }
 
 async fn read_file_preview(connection: &ConnectedDataset, path: &str) -> Result<FilePreview> {
@@ -234,11 +231,8 @@ pub(crate) async fn transaction(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<TransactionView>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    read_transaction(&connection, &query.path)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let connection = connected(&state, query.connection_id)?;
+    Ok(Json(read_transaction(&connection, &query.path).await?))
 }
 
 async fn read_transaction(connection: &ConnectedDataset, path: &str) -> Result<TransactionView> {

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::{
     blob::{detect_media_type, list_value, load_blob_array, parse_index_path},
-    error::{ApiError, RangeNotSatisfiable},
+    error::{ApiError, RequestError::RangeNotSatisfiable},
     schema::{is_blob_array_field, is_blob_field},
     state::{AppState, ConnectedDataset, connected},
 };
@@ -34,15 +34,14 @@ pub(crate) async fn media(
     headers: HeaderMap,
     method: Method,
 ) -> Result<Response<Body>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id)?;
     let source_field = connection
         .dataset
         .schema()
         .fields
         .iter()
         .find(|field| field.id == field_id)
-        .with_context(|| format!("unknown source field id {field_id}"))
-        .map_err(ApiError)?;
+        .with_context(|| format!("unknown source field id {field_id}"))?;
     let column = source_field.name.clone();
     let arrow_field = arrow_schema::Field::from(source_field);
     let blob_array = is_blob_array_field(&arrow_field);
@@ -51,7 +50,7 @@ pub(crate) async fn media(
             "column {column} is not a Lance blob column"
         )));
     }
-    read_media(
+    Ok(read_media(
         &connection,
         &column,
         blob_array,
@@ -60,8 +59,7 @@ pub(crate) async fn media(
         &headers,
         method == Method::HEAD,
     )
-    .await
-    .map_err(ApiError)
+    .await?)
 }
 
 async fn read_media(

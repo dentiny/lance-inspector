@@ -26,7 +26,10 @@ use crate::models::{RowView, RowsResponse, SqlCursorResponse, SqlPageResponse};
 
 use super::{
     blob::media_items,
-    error::{ApiError, InvalidRequest, QueryExecutionFailed, UnknownQueryCursor},
+    error::{
+        ApiError,
+        RequestError::{InvalidRequest, QueryExecutionFailed, UnknownQueryCursor},
+    },
     schema::{MediaProjection, dataset_columns, sql_columns},
     state::{AppState, ConnectedDataset, ConnectionQuery, QUERY_IDLE_TTL, QueryCursor, connected},
 };
@@ -51,11 +54,8 @@ pub(crate) async fn rows(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RowsQuery>,
 ) -> Result<Json<RowsResponse>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    read_rows(&connection, query)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let connection = connected(&state, query.connection_id)?;
+    Ok(Json(read_rows(&connection, query).await?))
 }
 
 async fn read_rows(connection: &ConnectedDataset, query: RowsQuery) -> Result<RowsResponse> {
@@ -122,11 +122,10 @@ pub(crate) async fn start_sql(
     Query(query): Query<ConnectionQuery>,
     Json(request): Json<SqlRequest>,
 ) -> Result<Json<SqlCursorResponse>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
-    create_sql_cursor(&state, query.connection_id, &connection, &request.sql)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let connection = connected(&state, query.connection_id)?;
+    Ok(Json(
+        create_sql_cursor(&state, query.connection_id, &connection, &request.sql).await?,
+    ))
 }
 
 async fn create_sql_cursor(
@@ -196,11 +195,8 @@ pub(crate) async fn sql_page(
     Path(cursor_id): Path<Uuid>,
     Query(query): Query<SqlPageQuery>,
 ) -> Result<Json<SqlPageResponse>, ApiError> {
-    connected(&state, query.connection_id).map_err(ApiError)?;
-    read_sql_page(&state, cursor_id, query)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    connected(&state, query.connection_id)?;
+    Ok(Json(read_sql_page(&state, cursor_id, query).await?))
 }
 
 async fn read_sql_page(
@@ -295,7 +291,7 @@ pub(crate) async fn cancel_sql(
     Path(cursor_id): Path<Uuid>,
     Query(query): Query<ConnectionQuery>,
 ) -> Result<StatusCode, ApiError> {
-    connected(&state, query.connection_id).map_err(ApiError)?;
+    connected(&state, query.connection_id)?;
     if let Some(cursor) = state.queries.get(&cursor_id)
         && cursor.lock().await.connection_id == query.connection_id
     {

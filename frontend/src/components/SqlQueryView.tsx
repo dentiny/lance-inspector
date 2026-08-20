@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowRight, CircleAlert, RefreshCw } from 'lucide-react'
-import { connectedUrl, HttpError, requireOk } from '../api'
+import { connectedUrl, HttpError, requestJson } from '../api'
 import type { DatasetInfo, SqlCursorResponse, SqlPageResponse, TableData } from '../types'
 import { DatasetStructure } from './DatasetStructure'
 import { RowsTable } from './RowsTable'
@@ -40,12 +40,10 @@ function SqlQueryView({ connectionId }: { connectionId: string }) {
     setError('')
     setStreaming(true)
     try {
-      const response = await fetch(connectedUrl(
+      const page = await requestJson<SqlPageResponse>(connectedUrl(
         `/api/sql/${encodeURIComponent(cursorId)}/page?sequence=${sequence}`,
         connectionId,
       ), { signal: controller.signal })
-      await requireOk(response)
-      const page = await response.json() as SqlPageResponse
       if (run !== generation.current || cursor.current !== cursorId) return
       setData((current) => replace || !current
         ? { ...(current ?? { columns: [], media_columns: [] }), rows: page.rows }
@@ -89,14 +87,12 @@ function SqlQueryView({ connectionId }: { connectionId: string }) {
     request.current = controller
     loading.current = true
     try {
-      const response = await fetch(connectedUrl('/api/sql/start', connectionId), {
+      const started = await requestJson<SqlCursorResponse>(connectedUrl('/api/sql/start', connectionId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql: statement }),
         signal: controller.signal,
       })
-      await requireOk(response)
-      const started = await response.json() as SqlCursorResponse
       if (run !== generation.current) {
         cancelSqlCursor(started.cursor_id, connectionId)
         return

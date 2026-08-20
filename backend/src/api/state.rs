@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    error::{UnknownConnection, UnknownDiscovery},
+    error::RequestError::{UnknownConnection, UnknownDiscovery},
     schema::MediaProjection,
 };
 
@@ -58,62 +58,47 @@ impl AppState {
 }
 
 #[derive(Clone)]
-pub(super) struct DiscoveryEntry {
-    dataset: Arc<Dataset>,
-    uri: String,
+pub(super) struct IdleEntry<T> {
+    value: T,
     last_accessed: Arc<Mutex<Instant>>,
 }
 
-impl DiscoveryEntry {
-    pub(super) fn new(dataset: Arc<Dataset>, uri: String) -> Self {
+impl<T: Clone> IdleEntry<T> {
+    pub(super) fn new(value: T) -> Self {
         Self {
-            dataset,
-            uri,
+            value,
             last_accessed: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
-    fn access(&self) -> Option<(Arc<Dataset>, String)> {
+    fn access(&self, ttl: Duration) -> Option<T> {
         let now = Instant::now();
         let mut last_accessed = self
             .last_accessed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if now.duration_since(*last_accessed) >= DISCOVERY_IDLE_TTL {
+        if now.duration_since(*last_accessed) >= ttl {
             return None;
         }
         *last_accessed = now;
-        Some((self.dataset.clone(), self.uri.clone()))
+        Some(self.value.clone())
     }
 }
 
+pub(super) type DiscoveryEntry = IdleEntry<(Arc<Dataset>, String)>;
+
 #[derive(Clone)]
 pub(super) struct SessionEntry {
-    connection: ConnectedDataset,
-    last_accessed: Arc<Mutex<Instant>>,
+    connection: IdleEntry<ConnectedDataset>,
     pub(super) file_listing: Arc<AsyncMutex<Option<FileListing>>>,
 }
 
 impl SessionEntry {
     pub(super) fn new(connection: ConnectedDataset) -> Self {
         Self {
-            connection,
-            last_accessed: Arc::new(Mutex::new(Instant::now())),
+            connection: IdleEntry::new(connection),
             file_listing: Arc::new(AsyncMutex::new(None)),
         }
-    }
-
-    fn access(&self) -> Option<ConnectedDataset> {
-        let now = Instant::now();
-        let mut last_accessed = self
-            .last_accessed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if now.duration_since(*last_accessed) >= CONNECTION_IDLE_TTL {
-            return None;
-        }
-        *last_accessed = now;
-        Some(self.connection.clone())
     }
 }
 
@@ -176,7 +161,7 @@ pub(super) fn discovered(state: &AppState, discovery_id: Uuid) -> Result<(Arc<Da
         .discoveries
         .get(&discovery_id)
         .ok_or(UnknownDiscovery(discovery_id))?;
-    if let Some(dataset) = entry.access() {
+    if let Some(dataset) = entry.access(DISCOVERY_IDLE_TTL) {
         return Ok(dataset);
     }
     state.discoveries.remove(&discovery_id);
@@ -192,7 +177,7 @@ pub(super) fn connected_session(
         .get(&connection_id)
         .ok_or(UnknownConnection(connection_id))?;
     let session = entry;
-    if let Some(connection) = session.access() {
+    if let Some(connection) = session.connection.access(CONNECTION_IDLE_TTL) {
         return Ok((session, connection));
     }
     state.connections.remove(&connection_id);
@@ -208,7 +193,7 @@ mod tests {
     use super::*;
     use crate::api::{
         dataset::build_dataset_info,
-        error::{ApiError, UnknownConnection},
+        error::{ApiError, RequestError},
     };
 
     #[tokio::test]
@@ -262,8 +247,9 @@ mod tests {
         };
         assert_eq!(
             error
-                .downcast_ref::<UnknownConnection>()
-                .map(ToString::to_string)
+                .downcast_ref::<RequestError>()
+                .and_then(|error| matches!(error, RequestError::UnknownConnection(_))
+                    .then(|| error.to_string()))
                 .as_deref(),
             Some(
                 format!(

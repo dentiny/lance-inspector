@@ -9,7 +9,7 @@ import {
   Rows3,
   Search,
 } from 'lucide-react'
-import { connectedUrl, requireOk } from './api'
+import { connectedUrl, errorMessage, isAbortError, requestJson } from './api'
 import { DatasetConnector, ReferenceBrowser } from './components/DatasetConnector'
 import { FileDataView } from './components/DataViews'
 import { FileTree } from './components/FileTree'
@@ -45,19 +45,23 @@ function App() {
     return () => window.removeEventListener('lance-connection-expired', reconnect)
   }, [])
 
-  const connected = async (nextConnection: ConnectedDataset) => {
-    fileRequest.current?.abort()
+  const loadFiles = async (nextConnection: ConnectedDataset, offset: number, append: boolean) => {
+    if (!append) fileRequest.current?.abort()
     const controller = new AbortController()
     fileRequest.current = controller
-    const generation = ++fileGeneration.current
+    const generation = append ? fileGeneration.current : ++fileGeneration.current
+    setLoadingFiles(append)
     try {
-      const response = await fetch(
-        connectedUrl(`/api/files?offset=0&limit=${FILES_PAGE_SIZE}`, nextConnection.connection_id),
+      const page = await requestJson<FilesPage>(
+        connectedUrl(`/api/files?offset=${offset}&limit=${FILES_PAGE_SIZE}`, nextConnection.connection_id),
         { signal: controller.signal },
       )
-      await requireOk(response)
-      const page = await response.json() as FilesPage
       if (generation !== fileGeneration.current) return
+      if (append) {
+        setFiles((current) => [...current, ...page.entries])
+        setNextFileOffset(page.next_offset)
+        return
+      }
       setConnection(nextConnection)
       if (pendingCatalog) setCatalog(pendingCatalog)
       setPendingCatalog(undefined)
@@ -68,39 +72,20 @@ function App() {
       setShowReference(false)
       setError('')
     } catch (reason) {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return
-      setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      if (generation === fileGeneration.current) fileRequest.current = undefined
-    }
-  }
-
-  const loadMoreFiles = async () => {
-    if (!connectionId || nextFileOffset === null || loadingFiles) return
-    const controller = new AbortController()
-    fileRequest.current = controller
-    const generation = fileGeneration.current
-    setLoadingFiles(true)
-    try {
-      const response = await fetch(
-        connectedUrl(`/api/files?offset=${nextFileOffset}&limit=${FILES_PAGE_SIZE}`, connectionId),
-        { signal: controller.signal },
-      )
-      await requireOk(response)
-      const page = await response.json() as FilesPage
-      if (generation !== fileGeneration.current) return
-      setFiles((current) => [...current, ...page.entries])
-      setNextFileOffset(page.next_offset)
-    } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
-        setError(reason instanceof Error ? reason.message : String(reason))
-      }
+      if (!isAbortError(reason)) setError(errorMessage(reason))
     } finally {
       if (generation === fileGeneration.current) {
         fileRequest.current = undefined
         setLoadingFiles(false)
       }
     }
+  }
+
+  const connected = (nextConnection: ConnectedDataset) => loadFiles(nextConnection, 0, false)
+
+  const loadMoreFiles = () => {
+    if (!connection || nextFileOffset === null || loadingFiles) return
+    void loadFiles(connection, nextFileOffset, true)
   }
 
   const discovered = (nextCatalog: ReferenceCatalog) => {

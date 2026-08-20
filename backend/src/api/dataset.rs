@@ -31,7 +31,7 @@ pub(crate) async fn dataset_info(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConnectionQuery>,
 ) -> Result<Json<Arc<DatasetInfo>>, ApiError> {
-    let connection = connected(&state, query.connection_id).map_err(ApiError)?;
+    let connection = connected(&state, query.connection_id)?;
     Ok(Json(connection.info))
 }
 
@@ -50,7 +50,7 @@ pub(crate) async fn discover_dataset(
     State(state): State<Arc<AppState>>,
     Json(request): Json<DiscoverRequest>,
 ) -> Result<Json<ReferenceCatalog>, ApiError> {
-    discover(&state, request).await.map(Json).map_err(ApiError)
+    Ok(Json(discover(&state, request).await?))
 }
 
 async fn discover(state: &AppState, request: DiscoverRequest) -> Result<ReferenceCatalog> {
@@ -121,7 +121,7 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
     let discovery_id = Uuid::new_v4();
     state
         .discoveries
-        .insert(discovery_id, DiscoveryEntry::new(root, uri.to_string()));
+        .insert(discovery_id, DiscoveryEntry::new((root, uri.to_string())));
     Ok(ReferenceCatalog {
         discovery_id,
         uri: uri.to_string(),
@@ -134,7 +134,7 @@ pub(crate) async fn connect_dataset(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConnectRequest>,
 ) -> Result<Json<ConnectResponse>, ApiError> {
-    connect(&state, request).await.map(Json).map_err(ApiError)
+    Ok(Json(connect(&state, request).await?))
 }
 
 async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectResponse> {
@@ -158,70 +158,70 @@ async fn connect(state: &AppState, request: ConnectRequest) -> Result<ConnectRes
     })
 }
 
+#[derive(Clone, Copy)]
+enum DatasetReference<'a> {
+    Main,
+    Version(u64),
+    Branch(&'a str),
+    Tag(&'a str),
+    BranchVersion(&'a str, u64),
+}
+
+impl std::fmt::Display for DatasetReference<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Main => formatter.write_str("main"),
+            Self::Version(version) => write!(formatter, "version {version}"),
+            Self::Branch(branch) => write!(formatter, "branch {branch}"),
+            Self::Tag(tag) => write!(formatter, "tag {tag}"),
+            Self::BranchVersion(branch, version) => write!(formatter, "{branch} version {version}"),
+        }
+    }
+}
+
 async fn resolve_reference(root: Arc<Dataset>, reference: &str) -> Result<Arc<Dataset>> {
-    if reference.eq_ignore_ascii_case("main") {
+    let target = if reference.eq_ignore_ascii_case("main") {
+        DatasetReference::Main
+    } else if let Ok(version) = reference.parse() {
+        DatasetReference::Version(version)
+    } else if let Some(version) = reference.strip_prefix("version:") {
+        DatasetReference::Version(
+            version
+                .parse()
+                .with_context(|| format!("invalid version reference {reference}"))?,
+        )
+    } else if let Some(branch) = reference.strip_prefix("branch:") {
+        DatasetReference::Branch(branch)
+    } else if let Some(tag) = reference.strip_prefix("tag:") {
+        DatasetReference::Tag(tag)
+    } else if let Some((branch, version)) = reference.rsplit_once(':')
+        && let Ok(version) = version.parse()
+    {
+        DatasetReference::BranchVersion(branch, version)
+    } else if root.list_branches().await?.contains_key(reference) {
+        DatasetReference::Branch(reference)
+    } else if root.tags().list().await?.contains_key(reference) {
+        DatasetReference::Tag(reference)
+    } else {
+        bail!(
+            "reference '{reference}' was not found as a branch or tag; use a numeric version, branch:<name>, or tag:<name>"
+        )
+    };
+
+    if matches!(target, DatasetReference::Main) {
         return Ok(root);
     }
-    if let Ok(version) = reference.parse::<u64>() {
-        return root
-            .checkout_version(version)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out version {version}"));
+    let dataset = match target {
+        DatasetReference::Main => unreachable!(),
+        DatasetReference::Version(version) => root.checkout_version(version).await,
+        DatasetReference::Branch(branch) => root.checkout_branch(branch).await,
+        DatasetReference::Tag(tag) => root.checkout_version(tag).await,
+        DatasetReference::BranchVersion(branch, version) => {
+            root.checkout_version((branch, version)).await
+        }
     }
-    if let Some(version) = reference.strip_prefix("version:") {
-        let version = version
-            .parse::<u64>()
-            .with_context(|| format!("invalid version reference {reference}"))?;
-        return root
-            .checkout_version(version)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out version {version}"));
-    }
-    if let Some(branch) = reference.strip_prefix("branch:") {
-        return root
-            .checkout_branch(branch)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out branch {branch}"));
-    }
-    if let Some(tag) = reference.strip_prefix("tag:") {
-        return root
-            .checkout_version(tag)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out tag {tag}"));
-    }
-    if let Some((branch, version)) = reference.rsplit_once(':')
-        && let Ok(version) = version.parse::<u64>()
-    {
-        return root
-            .checkout_version((branch, version))
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out {branch} version {version}"));
-    }
-
-    let branches = root.list_branches().await?;
-    if branches.contains_key(reference) {
-        return root
-            .checkout_branch(reference)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out branch {reference}"));
-    }
-    let tags = root.tags().list().await?;
-    if tags.contains_key(reference) {
-        return root
-            .checkout_version(reference)
-            .await
-            .map(Arc::new)
-            .with_context(|| format!("failed to check out tag {reference}"));
-    }
-    bail!(
-        "reference '{reference}' was not found as a branch or tag; use a numeric version, branch:<name>, or tag:<name>"
-    )
+    .with_context(|| format!("failed to check out {target}"))?;
+    Ok(Arc::new(dataset))
 }
 pub(super) async fn build_dataset_info(
     dataset: &Dataset,
