@@ -16,7 +16,7 @@ const cancelSqlCursor = (cursorId: string | undefined, connectionId: string) => 
   }).catch(() => undefined)
 }
 
-function SqlQueryView({ connectionId }: { connectionId: string }) {
+function SqlQueryView({ connectionId, datasetKey }: { connectionId: string; datasetKey: string }) {
   const [sql, setSql] = useState(DEFAULT_SQL)
   const [data, setData] = useState<TableData>()
   const [error, setError] = useState('')
@@ -204,6 +204,7 @@ function SqlQueryView({ connectionId }: { connectionId: string }) {
           <RowsTable
             data={data}
             connectionId={connectionId}
+            datasetKey={datasetKey}
             footer={(
               <div ref={loadMoreSentinel} className="loading-state">
                 {streaming
@@ -240,7 +241,7 @@ export function DatasetQueryView({
         subtitle={info.uri}
         badge={<span className="count-badge">{info.rows.toLocaleString()} rows · {info.branch} v{info.version}</span>}
       />
-      <SqlQueryView connectionId={connectionId} />
+      <SqlQueryView connectionId={connectionId} datasetKey={info.uri} />
       <DatasetStructure info={info} />
     </div>
   )
