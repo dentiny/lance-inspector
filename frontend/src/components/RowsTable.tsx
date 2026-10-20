@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { X } from 'lucide-react'
+import { fieldLabel, MAX_STRUCTURED_CHARACTERS, preferenceKey, structuredValue, type FieldPath } from '../contentPreview'
+import { ContentPreview } from './ContentPreview'
+import { JsonFieldTree } from './JsonFieldTree'
 import { connectedUrl } from '../api'
 import type { RowsResponse, TableData } from '../types'
 
@@ -119,22 +123,154 @@ function MediaValue({
   )
 }
 
-function ScalarValue({ value }: { value: unknown }) {
-  if (value == null) return <span className="null-value">null</span>
-  if (typeof value === 'boolean') return <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
-  if (typeof value === 'object') return <code>{JSON.stringify(value)}</code>
-  return <span>{String(value)}</span>
+const displayValue = (value: unknown) => {
+  if (typeof value === 'object' && value != null) return JSON.stringify(value)
+  return String(value)
+}
+
+const formattedJson = (value: unknown) => {
+  if (typeof value === 'object' && value != null) return JSON.stringify(value, null, 2)
+  if (typeof value !== 'string' || value.length > MAX_STRUCTURED_CHARACTERS) return undefined
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined
+  try {
+    const parsed = JSON.parse(trimmed)
+    return typeof parsed === 'object' && parsed != null
+      ? JSON.stringify(parsed, null, 2)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const hexPattern = /^(?:[0-9a-f]{2})+$/i
+const hasControlCharacters = (text: string) => {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index)
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) return true
+  }
+  return false
+}
+
+// arrow-json serializes Binary/LargeBinary columns as lowercase hex strings.
+const decodeHexText = (value: unknown) => {
+  if (typeof value !== 'string' || !hexPattern.test(value)) return undefined
+  const bytes = new Uint8Array(value.length / 2)
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(value.slice(index * 2, index * 2 + 2), 16)
+  }
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return hasControlCharacters(text) ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+type InspectedValue = {
+  column: string
+  value: unknown
+}
+
+function ScalarValue({
+  value,
+  column,
+  onInspect,
+}: {
+  value: unknown
+  column: string
+  onInspect: (value: InspectedValue) => void
+}) {
+  let content
+  if (value == null) content = <span className="null-value">null</span>
+  else if (typeof value === 'boolean') content = <span className={value ? 'bool-true' : 'bool-false'}>{String(value)}</span>
+  else if (typeof value === 'object') content = <code>{displayValue(value)}</code>
+  else content = <span>{String(value)}</span>
+
+  if (value == null) return <div className="scalar-value">{content}</div>
+  return (
+    <button
+      type="button"
+      className="scalar-value scalar-value-button"
+      onClick={() => onInspect({ column, value })}
+      title="View full value"
+    >
+      {content}
+    </button>
+  )
+}
+
+function ValueInspector({ inspected, datasetKey, onClose }: {
+  inspected: InspectedValue
+  datasetKey: string
+  onClose: () => void
+}) {
+  const [wrap, setWrap] = useState(true)
+  const [pretty, setPretty] = useState(true)
+  const decoded = useMemo(() => decodeHexText(inspected.value), [inspected.value])
+  const [selected, setSelected] = useState<{ path: FieldPath; value: unknown }>()
+  const root = decoded ?? inspected.value
+  const structured = useMemo(() => structuredValue(root), [root])
+  const selectedValue = selected?.value ?? root
+  const label = fieldLabel(inspected.column, selected?.path ?? [])
+  const preference = preferenceKey(datasetKey, inspected.column, selected?.path ?? [])
+  const [showFields, setShowFields] = useState(true)
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
+  return (
+    <>
+      <button className="value-inspector-backdrop" type="button" aria-label="Close value inspector" onClick={onClose} />
+      <aside className="value-inspector" role="dialog" aria-modal="true" aria-labelledby="value-inspector-title">
+        <header className="value-inspector-header">
+          <div><span className="eyebrow">Full cell value</span><h2 id="value-inspector-title">{inspected.column}</h2></div>
+          <button className="icon-button" type="button" aria-label="Close value inspector" onClick={onClose}><X size={17} /></button>
+        </header>
+        {structured && (
+          <section className="inspector-fields">
+            <button className="inspector-fields-toggle" type="button" aria-expanded={showFields} onClick={() => setShowFields(!showFields)}>
+              {showFields ? '▾' : '▸'} JSON fields · select a value to preview
+            </button>
+            {showFields && <div className="inspector-field-tree"><JsonFieldTree value={root} label={inspected.column} selectedPath={selected?.path ?? []} onSelect={(path, value) => setSelected({ path, value })} /></div>}
+          </section>
+        )}
+        <div className="value-inspector-selection" title={label}>{label}</div>
+        <ContentPreview
+          key={`${preference}:${typeof selectedValue}`}
+          value={selectedValue}
+          rawValue={selected ? selected.value : inspected.value}
+          decoded={selected ? undefined : decoded}
+          label={label}
+          preference={preference}
+          wrap={wrap}
+          pretty={pretty}
+          onWrap={() => setWrap(!wrap)}
+          onPretty={() => setPretty(!pretty)}
+          formattedJson={formattedJson}
+        />
+      </aside>
+    </>
+  )
 }
 
 export function RowsTable({
   data,
   connectionId,
+  datasetKey = connectionId,
   footer,
 }: {
   data: TableData
   connectionId: string
+  datasetKey?: string
   footer?: ReactNode
 }) {
+  const [inspected, setInspected] = useState<InspectedValue>()
+  const [inspectionId, setInspectionId] = useState(0)
+  const inspect = (value: InspectedValue) => { setInspected(value); setInspectionId((id) => id + 1) }
   const scalarColumns = data.columns.filter((column) => column !== '_rowaddr')
   return (
     <div className="table-scroll">
@@ -147,7 +283,9 @@ export function RowsTable({
           {data.rows.map((row, index) => (
             <tr key={String(row.values._rowaddr ?? index)}>
               {scalarColumns.map((column) => (
-                <td key={column}><ScalarValue value={row.values[column]} /></td>
+                <td key={column}>
+                  <ScalarValue value={row.values[column]} column={column} onInspect={inspect} />
+                </td>
               ))}
               {data.media_columns.map((column) => (
                 <td key={column.name}>
@@ -164,6 +302,7 @@ export function RowsTable({
         </tbody>
       </table>
       {footer}
+      {inspected && <ValueInspector key={inspectionId} inspected={inspected} datasetKey={datasetKey} onClose={() => setInspected(undefined)} />}
     </div>
   )
 }

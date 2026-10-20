@@ -49,9 +49,11 @@ function ManifestView({ info, file }: { info: DatasetInfo; file: FileEntry }) {
 
 function RowsPanel({
   connectionId,
+  datasetKey,
   title = 'Row preview',
 }: {
   connectionId: string
+  datasetKey: string
   title?: string
 }) {
   const [offset, setOffset] = useState(0)
@@ -68,7 +70,7 @@ function RowsPanel({
       {(error || !data) && <AsyncStatus error={error} loading="Scanning Lance rows…" />}
       {data && (
         <>
-          <RowsTable data={data} connectionId={connectionId} />
+          <RowsTable data={data} connectionId={connectionId} datasetKey={datasetKey} />
           <div className="pagination">
             <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button>
             <span>20 rows per page</span>
@@ -91,7 +93,7 @@ function DataView({ info, file, connectionId }: { info: DatasetInfo; file: FileE
         badge={<span className="count-badge">{formatBytes(file.size)}</span>}
       />
       {fragment?.deletion && <DeletionGrid fragment={fragment} />}
-      <RowsPanel key={file.path} connectionId={connectionId} />
+      <RowsPanel key={file.path} connectionId={connectionId} datasetKey={info.uri} />
     </div>
   )
 }

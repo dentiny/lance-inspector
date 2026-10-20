@@ -7,20 +7,26 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test tests/*.test.tsx"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.10",
     "lucide-react": "^1.29.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
+    "jsdom": "^30.1.3",
     "oxlint": "^1.75.0",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
   }

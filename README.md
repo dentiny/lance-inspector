@@ -54,6 +54,26 @@ dashboard or dataset editor.
 
 ![Streaming SQL results with image, audible audio, and video Blob previews in User mode](docs/images/multimodal-preview-user.png)
 
+### Markdown, HTML, and nested JSON cells
+
+Click a scalar cell in either row previews or SQL results to open its inspector.
+JSON objects, arrays, JSON-encoded strings, and complete JSONL records expose an
+expandable field tree. Select a nested value and choose **Text**, **Markdown**,
+or **HTML**. Copy source always copies the original selected value, including
+Markdown markers and HTML tags. Choices persist in browser storage per dataset
+and field; array indices share a preference.
+
+Markdown supports GFM tables, task lists, and code blocks. HTML renders static
+HTML/CSS in a sandbox with scripts, forms, external resources, and navigation
+disabled; images are limited to inline `data:` URLs. Binary cells that decode as
+UTF-8 can be viewed as Hex or Text, and Atom/RSS documents render as a feed.
+Structured parsing and rich rendering are capped at 2,097,152 characters; large
+values remain available as source. Trees reveal children lazily, 50 at a time,
+with a maximum expanded depth of 32.
+
+Run frontend checks with `npm ci`, `npm test`, `npm run lint`, and
+`npm run build` from `frontend`.
+
 ### Human-readable transaction history
 
 ![Decoded protobuf transaction operation in Infra mode](docs/images/transaction-inspector-infra.png)
