@@ -54,16 +54,38 @@ dashboard or dataset editor.
 
 ![Streaming SQL results with image, audible audio, and video Blob previews in User mode](docs/images/multimodal-preview-user.png)
 
-### Markdown, HTML, and nested JSON cells
+### Markdown, LaTeX, HTML, and nested JSON cells
 
 Click a scalar cell in either row previews or SQL results to open its inspector.
 JSON objects, arrays, JSON-encoded strings, and complete JSONL records expose an
 expandable field tree. Select a nested value and choose **Text**, **Markdown**,
-or **HTML**. Copy source always copies the original selected value, including
+**LaTeX**, or **HTML**. Copy source always copies the original selected value, including
 Markdown markers and HTML tags. Choices persist in browser storage per dataset
 and field; array indices share a preference.
 
-Markdown supports GFM tables, task lists, and code blocks. HTML renders static
+Markdown supports GFM tables, task lists, code blocks, and inline/block math
+with `$...$` and `$$...$$`. Code spans and fenced code blocks stay literal.
+
+Choose **LaTeX** for a bare formula such as `\frac{a}{b}`, prose containing
+`$...$`, `$$...$$`, `\(...\)`, or `\[...\]`, or a structured LaTeX document.
+Documents and fragments such as `\section{Introduction}` render as readable
+articles with titles, authors, abstracts, sections, lists, tables, and equations.
+
+![LaTeX document preview with title, sections, equations, and a table](docs/images/latex-document-preview.png)
+
+![Markdown preview with inline and display mathematics](docs/images/markdown-math-preview.png)
+
+The document parser runs in a dedicated worker with a five-second timeout.
+This is an HTML reading preview, not a TeX-to-PDF compiler: custom package
+styling and bibliography resolution are unavailable, unsupported commands are
+reported, and external images and included files appear as placeholders. No
+TeX commands are executed and no packages or external files are loaded. Fonts
+are bundled locally, trusted KaTeX commands are disabled, and formula expansion
+and sizes are bounded. Malformed formulas remain readable. **Text** and **Copy
+source** preserve the original selected value, including decoded UTF-8 binary
+cells; the selected rendering mode is remembered per dataset and field.
+
+HTML renders static
 HTML/CSS in a sandbox with scripts, forms, external resources, and navigation
 disabled; images are limited to inline `data:` URLs. Binary cells that decode as
 UTF-8 can be viewed as Hex or Text, and Atom/RSS documents render as a feed.
