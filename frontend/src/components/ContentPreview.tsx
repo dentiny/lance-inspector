@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Check, Copy, WrapText } from 'lucide-react'
 import { MAX_STRUCTURED_CHARACTERS, sourceText, type ContentView } from '../contentPreview'
 import { feedToHtml, previewDocument } from '../contentPreviewHtml'
+import { LatexContent } from './LatexContent'
+import { MarkdownContent } from './MarkdownContent'
 
 function savedView(key: string): ContentView {
   try {
     const view = localStorage.getItem(key)
-    if (view === 'text' || view === 'markdown' || view === 'html') return view
+    if (view === 'text' || view === 'markdown' || view === 'html' || view === 'latex') return view
   } catch { /* Storage can be unavailable in private/embedded contexts. */ }
   return 'raw'
 }
@@ -30,7 +30,7 @@ export function ContentPreview({ value, rawValue, decoded, label, preference, wr
   const [copyError, setCopyError] = useState('')
   const text = sourceText(view === 'raw' ? rawValue : value)
   const formatted = useMemo(() => formattedJson(view === 'raw' ? rawValue : value), [view, rawValue, value, formattedJson])
-  const rendered = view === 'markdown' || view === 'html'
+  const rendered = view === 'markdown' || view === 'html' || view === 'latex'
   const previewTooLarge = text.length > MAX_STRUCTURED_CHARACTERS
   const feed = useMemo(() => view === 'html' && !previewTooLarge && typeof value === 'string' ? feedToHtml(value) : undefined, [view, value, previewTooLarge])
   const html = useMemo(() => view === 'html' && !previewTooLarge ? previewDocument(feed?.html ?? text) : '', [view, feed, text, previewTooLarge])
@@ -64,6 +64,7 @@ export function ContentPreview({ value, rawValue, decoded, label, preference, wr
         {decoded !== undefined && <button type="button" className={view === 'text' ? 'active' : ''} onClick={() => choose('text')}>Text</button>}
         {typeof value === 'string' && <>
           <button type="button" aria-pressed={view === 'markdown'} className={view === 'markdown' ? 'active' : ''} onClick={() => choose('markdown')}>Markdown</button>
+          <button type="button" aria-pressed={view === 'latex'} className={view === 'latex' ? 'active' : ''} onClick={() => choose('latex')}>LaTeX</button>
           <button type="button" aria-pressed={view === 'html'} className={view === 'html' ? 'active' : ''} onClick={() => choose('html')}>HTML</button>
         </>}
       </div>
@@ -72,11 +73,9 @@ export function ContentPreview({ value, rawValue, decoded, label, preference, wr
       <button type="button" onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? 'Copied' : 'Copy source'}</button>
     </div>
     {copyError && <p role="status" className="preview-note">{copyError}</p>}
-    {rendered && previewTooLarge ? <p className="preview-note" role="status">Content is too large for rich preview. Use Text or Copy source to inspect the complete value.</p> : view === 'markdown' ? <div className="content-markdown" aria-label={`${label} rendered as Markdown`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}
-        components={{ a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> }}
-      >{text}</ReactMarkdown>
-    </div> : view === 'html' ? <iframe className="value-inspector-html" title={`${label} rendered as HTML`} sandbox="" referrerPolicy="no-referrer" srcDoc={html} />
+    {rendered && previewTooLarge ? <p className="preview-note" role="status">Content is too large for rich preview. Use Text or Copy source to inspect the complete value.</p> : view === 'markdown' ? <MarkdownContent text={text} label={label} />
+      : view === 'latex' ? <LatexContent text={text} label={label} />
+      : view === 'html' ? <iframe className="value-inspector-html" title={`${label} rendered as HTML`} sandbox="" referrerPolicy="no-referrer" srcDoc={html} />
       : <pre className={wrap ? 'wrap' : ''}>{pretty && formatted ? formatted : text}</pre>}
   </>
 }

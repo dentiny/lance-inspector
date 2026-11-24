@@ -1,0 +1,60 @@
+\documentclass{article}
+\usepackage[preprint,sglblindworkshop]{Formatting_Instructions_For_NeurIPS_2026/neurips_2026}
+\workshoptitle{Foundations of Agentic Systems Theory (FAST)}
+\makeatletter
+\renewcommand{\@noticestring}{Accepted at the FAST Workshop at NeurIPS 2026.}
+\makeatother
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\hypersetup{hidelinks,pdftitle={Lance Inspector: Structured Document Preview}}
+\usepackage{url,booktabs,array,microtype,xcolor,graphicx,amsmath}
+\title{Lance Inspector: Structured Document Preview}
+\author{Alex Example$^{1}$\qquad Blair Example$^{2}$\qquad Casey Example$^{2}$\\[0.35em]
+$^{1}$Dataset Research Team\\
+$^{2}$Storage Systems Team}
+\date{}
+\begin{document}
+\maketitle
+\begin{abstract}
+This synthetic regression body tests a paper with an unavailable conference style.
+It contains inline math $p(a\mid s)$ and \textbf{formatted prose}.
+\end{abstract}
+\section{Introduction}
+Agents gather information before choosing an action. This paragraph must appear as
+readable prose rather than TeX source.
+
+A second paragraph contains \emph{emphasis}, an escaped percent sign (50\%), and a citation~\citep{example2026}.
+\subsection{A decision rule}
+\begin{equation}
+ a^* = \arg\max_a \sum_s p(s) U(a,s)
+\end{equation}
+\begin{align}
+x &= y + 1 \\
+z &= x^2
+\end{align}
+\begin{itemize}
+\item Observe the environment.
+\item Choose an action.
+\end{itemize}
+\begin{enumerate}
+\item First step.
+\item Second step.
+\end{enumerate}
+\section{Results}
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Method & Score \\
+\midrule
+Baseline & 0.5 \\
+Agent & 0.9 \\
+\bottomrule
+\end{tabular}
+\caption{Synthetic results.}
+\end{table}
+\includegraphics[width=\linewidth]{missing-figure.pdf}
+\input{missing-appendix.tex}
+\bibliography{missing-references}
+\end{document}

@@ -6,6 +6,8 @@ import { createRoot } from 'react-dom/client'
 import { fieldLabel, MAX_STRUCTURED_CHARACTERS, preferenceKey, sourceText, structuredValue } from '../src/contentPreview'
 import { feedToHtml, previewDocument } from '../src/contentPreviewHtml'
 import { ContentPreview } from '../src/components/ContentPreview'
+import { LatexContent } from '../src/components/LatexContent'
+import { MarkdownContent } from '../src/components/MarkdownContent'
 import { JsonFieldTree } from '../src/components/JsonFieldTree'
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://viewer.example' })
@@ -108,5 +110,65 @@ test('remembers rendering preference and bounds rich rendering of large values',
   assert.match(container.textContent!, /too large|exceeds/i)
   await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((node) => node.textContent === 'Text')!.click())
   assert.equal(container.querySelector('pre')!.textContent, large)
+  await act(async () => root.unmount()); container.remove()
+})
+
+
+test('LaTeX renders bare math and mixed delimiters, preserves source, and remembers the view', async () => {
+  localStorage.clear()
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  const preference = preferenceKey('dataset', 'formula', [])
+  let copied = ''
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text } } })
+  const value = String.raw`\frac{a}{b}`
+  const props = { value, rawValue: value, label: 'formula', preference, wrap: true, pretty: false, onWrap: () => {}, onPretty: () => {}, formattedJson: () => undefined }
+  const click = async (name: string) => act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((node) => node.textContent === name)!.click())
+  await act(async () => root.render(<ContentPreview {...props} />))
+  await click('LaTeX')
+  assert.equal(container.querySelectorAll('.katex').length, 1)
+  assert.equal(container.querySelector('annotation')?.textContent, value)
+  assert.equal(localStorage.getItem(preference), 'latex')
+  await click('Copy source'); assert.equal(copied, value)
+  await click('Text'); assert.equal(container.querySelector('pre')?.textContent, value)
+  await click('LaTeX')
+  await act(async () => root.unmount())
+  const restored = createRoot(container)
+  await act(async () => restored.render(<ContentPreview {...props} />))
+  assert.ok(container.querySelector('.katex-display'))
+  const mixed = String.raw`Inline $x^2$ and \(y\). Display $$\sum_{i=1}^{n} i$$ and \[\frac{1}{2}\].`
+  await act(async () => restored.render(<ContentPreview {...props} value={mixed} rawValue={mixed} />))
+  assert.equal(container.querySelectorAll('.katex').length, 4)
+  assert.equal(container.querySelectorAll('.katex-display').length, 2)
+  assert.match(container.textContent!, /Inline/)
+  const large = 'x'.repeat(MAX_STRUCTURED_CHARACTERS + 1)
+  await act(async () => restored.render(<ContentPreview {...props} value={large} rawValue={large} />))
+  assert.equal(container.querySelector('.content-latex'), null)
+  assert.match(container.textContent!, /too large/)
+  await act(async () => restored.unmount()); container.remove()
+})
+
+test('Markdown renders inline and block math while keeping code literal', async () => {
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  const text = '# Math\n\nInline $x^2$.\n\n$$\n\\frac{1}{2}\n$$\n\n`$literal$`\n\n```text\n$code$\n```'
+  await act(async () => root.render(<MarkdownContent text={text} label="math" />))
+  assert.equal(container.querySelector('h1')?.textContent, 'Math')
+  assert.equal(container.querySelectorAll('.katex').length, 2)
+  assert.equal(container.querySelectorAll('.katex-display').length, 1)
+  assert.deepEqual(Array.from(container.querySelectorAll('code')).map((node) => node.textContent?.trim()), ['$literal$', '$code$'])
+  await act(async () => root.unmount()); container.remove()
+})
+
+test('math errors remain readable and untrusted commands cannot create active content', async () => {
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  for (const Component of [LatexContent, MarkdownContent]) {
+    const source = String.raw`$\frac$ and $\href{javascript:alert(1)}{click}$ and $\includegraphics{https://evil/image.png}$ <script>alert(1)</script>`
+    await act(async () => root.render(<Component text={source} label="untrusted" />))
+    assert.equal(container.querySelector('script, a, img, iframe'), null)
+    assert.ok(container.querySelector('.katex-error'))
+    assert.match(container.textContent!, /\\frac/)
+  }
   await act(async () => root.unmount()); container.remove()
 })

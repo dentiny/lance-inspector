@@ -1,4 +1,4 @@
-export type ContentView = 'raw' | 'text' | 'markdown' | 'html'
+export type ContentView = 'raw' | 'text' | 'markdown' | 'html' | 'latex'
 export type FieldPath = (string | number)[]
 export const MAX_STRUCTURED_CHARACTERS = 2 * 1024 * 1024
 
