@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Result;
 use arrow_array::{ArrayRef, RecordBatch};
-use datafusion_execution::SendableRecordBatchStream;
+use datafusion::execution::SendableRecordBatchStream;
 use lance::Dataset;
 use serde::Deserialize;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc};
@@ -115,6 +115,7 @@ impl SessionEntry {
 pub(super) struct ConnectedDataset {
     pub(super) dataset: Arc<Dataset>,
     pub(super) info: Arc<DatasetInfo>,
+    pub(super) sql_tables: super::namespace::SessionTables,
     blob_cache_namespace: Uuid,
     blob_arrays: Arc<BoundedCache<BlobArrayKey, BlobArraySlot>>,
 }
@@ -137,6 +138,7 @@ impl ConnectedDataset {
         Self {
             dataset,
             info,
+            sql_tables: Default::default(),
             blob_cache_namespace: Uuid::new_v4(),
             blob_arrays,
         }

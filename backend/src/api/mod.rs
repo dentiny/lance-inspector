@@ -4,13 +4,16 @@ mod error;
 mod files;
 mod health;
 mod media;
+mod namespace;
 mod query;
 mod schema;
 mod state;
+mod validation;
 
 pub(crate) use dataset::{connect_dataset, dataset_info, discover_dataset};
 pub(crate) use files::{file_preview, files, transaction};
 pub(crate) use health::health;
 pub(crate) use media::media;
+pub(crate) use namespace::routes as namespace_routes;
 pub(crate) use query::{cancel_sql, rows, sql_page, start_sql};
 pub(crate) use state::AppState;

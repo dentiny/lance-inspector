@@ -3816,8 +3816,9 @@ dependencies = [
  "arrow-buffer",
  "arrow-json",
  "arrow-schema",
+ "async-trait",
  "axum",
- "datafusion-execution",
+ "datafusion",
  "datafusion-expr",
  "datafusion-sql",
  "file-format",
@@ -3826,11 +3827,14 @@ dependencies = [
  "lance",
  "lance-core",
  "lance-file",
+ "lance-namespace",
+ "lance-namespace-datafusion",
  "lru",
  "pprof",
  "prost",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tikv-jemallocator",
  "tokio",
@@ -3900,6 +3904,18 @@ dependencies = [
  "lance-core",
  "lance-namespace-reqwest-client",
  "snafu",
+]
+
+[[package]]
+name = "lance-namespace-datafusion"
+version = "11.0.0-beta.7"
+source = "git+https://github.com/lance-format/lance.git?rev=17307f28d149eff34a0ecc5eca0e6ca903981620#17307f28d149eff34a0ecc5eca0e6ca903981620"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "datafusion",
+ "lance",
+ "lance-namespace",
 ]
 
 [[package]]

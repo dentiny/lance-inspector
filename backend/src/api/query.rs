@@ -34,8 +34,10 @@ use super::{
         ApiError,
         RequestError::{InvalidRequest, QueryExecutionFailed, UnknownQueryCursor},
     },
+    namespace,
     schema::{MediaProjection, dataset_columns, sql_columns},
     state::{AppState, ConnectedDataset, ConnectionQuery, QUERY_IDLE_TTL, QueryCursor, connected},
+    validation::{read_only_sql, validate_result_schema, validate_sql},
 };
 
 // Maximum number of rows accepted by the direct row-preview endpoint.
@@ -139,25 +141,35 @@ async fn create_sql_cursor(
     sql: &str,
 ) -> Result<SqlCursorResponse> {
     let sql = read_only_sql(sql)?;
-    let prepared = prepare_sql_with_row_addr(sql);
-    let (query, media_safe) = match prepared.as_deref() {
-        Some(prepared) => match build_sql_query(connection, prepared).await {
-            Ok(query) => (query, true),
-            Err(_) => (
+    let named = validate_sql(sql).map_err(|error| anyhow!(InvalidRequest(error.to_string())))?;
+    let (dataframe, media_safe) = if named {
+        (
+            namespace::prepare(connection, sql, SQL_PAGE_ROWS)
+                .await
+                .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
+            false,
+        )
+    } else {
+        let prepared = prepare_sql_with_row_addr(sql);
+        let (query, media_safe) = match prepared.as_deref() {
+            Some(prepared) => match build_sql_query(connection, prepared).await {
+                Ok(query) => (query, true),
+                Err(_) => (
+                    build_sql_query(connection, sql)
+                        .await
+                        .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
+                    false,
+                ),
+            },
+            None => (
                 build_sql_query(connection, sql)
                     .await
                     .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
                 false,
             ),
-        },
-        None => (
-            build_sql_query(connection, sql)
-                .await
-                .map_err(|error| anyhow!(InvalidRequest(error.to_string())))?,
-            false,
-        ),
+        };
+        (query.into_dataframe(), media_safe)
     };
-    let dataframe = query.into_dataframe();
     let source_names = if media_safe {
         direct_projection_sources(dataframe.logical_plan())
     } else {
@@ -166,6 +178,7 @@ async fn create_sql_cursor(
     let query = SqlQuery::new(dataframe);
     let record_stream = query.into_stream().await?;
     let result_schema = record_stream.schema();
+    validate_result_schema(&result_schema, named)?;
     let manifest = connection.dataset.manifest();
     let dataset_schema = ArrowSchema::from(&manifest.schema);
     let source_field_ids = manifest
@@ -332,26 +345,6 @@ pub(crate) async fn cancel_sql(
         state.queries.remove(&cursor_id);
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn read_only_sql(sql: &str) -> Result<&str> {
-    let sql = sql.trim().trim_end_matches(';').trim_end();
-    if sql.is_empty() {
-        return Err(anyhow!(InvalidRequest(
-            "SQL query cannot be empty".to_string()
-        )));
-    }
-    let first_keyword = sql
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(first_keyword.as_str(), "select" | "with") {
-        return Err(anyhow!(InvalidRequest(
-            "only read-only SELECT or WITH queries are supported".to_string()
-        )));
-    }
-    Ok(sql)
 }
 
 fn prepare_sql_with_row_addr(sql: &str) -> Option<String> {
@@ -528,18 +521,6 @@ mod tests {
     use lance_file::version::LanceFileVersion;
 
     use crate::api::{dataset::build_dataset_info, state::SessionEntry};
-
-    #[test]
-    fn accepts_only_read_only_sql() {
-        assert_eq!(
-            read_only_sql(" SELECT * FROM dataset; ").unwrap(),
-            "SELECT * FROM dataset"
-        );
-        assert!(read_only_sql("WITH selected AS (SELECT 1) SELECT * FROM selected").is_ok());
-        assert!(read_only_sql("DELETE FROM dataset").is_err());
-        assert!(read_only_sql("CREATE EXTERNAL TABLE secret").is_err());
-        assert!(read_only_sql("  ").is_err());
-    }
 
     #[test]
     fn prepares_only_simple_row_address_queries() {
@@ -848,5 +829,178 @@ mod tests {
             .map(|row| row.values["value"].as_i64().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(values, (0..45).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn namespace_join_pins_snapshots_through_detach_and_append() {
+        use arrow_schema::{DataType, Field};
+        let root = tempfile::tempdir().unwrap();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from_iter_values(0..45))],
+        )
+        .unwrap();
+        let write = async |name: &str| {
+            Arc::new(
+                Dataset::write(
+                    RecordBatchIterator::new([Ok(batch.clone())], schema.clone()),
+                    root.path().join(name).to_str().unwrap(),
+                    None,
+                )
+                .await
+                .unwrap(),
+            )
+        };
+        let left = write("left.lance").await;
+        let right = write("right.lance").await;
+        let info = Arc::new(build_dataset_info(&left, left.uri(), "main").await.unwrap());
+        let connection = ConnectedDataset::new(left.clone(), info);
+        namespace::attach_test(&connection, "recordings", &right)
+            .await
+            .unwrap();
+        let state = AppState::new();
+        let connection_id = Uuid::new_v4();
+        state
+            .connections
+            .insert(connection_id, SessionEntry::new(connection.clone()));
+        let sql = "WITH r AS (SELECT * FROM recordings) SELECT d.value, r.value AS base_value FROM dataset d JOIN r ON d.value=r.value WHERE EXISTS (SELECT 1 FROM recordings x WHERE x.value=d.value) ORDER BY d.value";
+        let started = create_sql_cursor(&state, connection_id, &connection, sql)
+            .await
+            .unwrap();
+        assert_eq!(started.columns, ["value", "base_value"]);
+        let page = async |sequence| {
+            read_sql_page(
+                &state,
+                started.cursor_id,
+                SqlPageQuery {
+                    connection_id,
+                    sequence,
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let first = page(0).await;
+        assert_eq!(first.rows.len(), 20);
+        assert_eq!(first.rows[0].values["value"], 0);
+        let mut writer = right.as_ref().clone();
+        let added = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![0]))])
+            .unwrap();
+        writer
+            .append(RecordBatchIterator::new([Ok(added)], schema), None)
+            .await
+            .unwrap();
+        // New preparations see the appended version.
+        let count = create_sql_cursor(
+            &state,
+            connection_id,
+            &connection,
+            "SELECT COUNT(*) AS n FROM recordings",
+        )
+        .await
+        .unwrap();
+        let count = read_sql_page(
+            &state,
+            count.cursor_id,
+            SqlPageQuery {
+                connection_id,
+                sequence: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(count.rows[0].values["n"], 46);
+        // Detach only affects future planning, not existing bound plans.
+        connection.sql_tables.write().await.clear();
+        assert!(
+            create_sql_cursor(&state, connection_id, &connection, sql)
+                .await
+                .is_err()
+        );
+        let second = page(1).await;
+        assert_eq!(second.rows.len(), 20);
+        let last = page(2).await;
+        assert_eq!(last, page(2).await);
+        assert_eq!(last.rows.len(), 5);
+        assert!(last.done);
+        assert_eq!(right.count_rows(None).await.unwrap(), 45);
+        assert_eq!(writer.count_rows(None).await.unwrap(), 46);
+        let other = ConnectedDataset::new(left.clone(), connection.info.clone());
+        assert!(
+            create_sql_cursor(&state, Uuid::new_v4(), &other, "SELECT * FROM recordings")
+                .await
+                .is_err()
+        );
+        let error = read_sql_page(
+            &state,
+            started.cursor_id,
+            SqlPageQuery {
+                connection_id: Uuid::new_v4(),
+                sequence: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn named_tables_reject_duplicate_names_and_blob_output() {
+        let schema = Arc::new(ArrowSchema::new(vec![blob_field("blob", true)]));
+        let mut blobs = BlobArrayBuilder::new(1);
+        blobs.push_bytes(b"payload").unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![blobs.finish().unwrap()]).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dataset = Arc::new(
+            Dataset::write(
+                RecordBatchIterator::new([Ok(batch)], schema),
+                root.path().join("blob.lance").to_str().unwrap(),
+                Some(WriteParams {
+                    data_storage_version: Some(LanceFileVersion::V2_3),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let info = Arc::new(
+            build_dataset_info(&dataset, dataset.uri(), "main")
+                .await
+                .unwrap(),
+        );
+        let connection = ConnectedDataset::new(dataset.clone(), info);
+        namespace::attach_test(&connection, "external", &dataset)
+            .await
+            .unwrap();
+        let state = AppState::new();
+        let id = Uuid::new_v4();
+        assert!(
+            create_sql_cursor(&state, id, &connection, "SELECT blob FROM external")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("metadata")
+        );
+        assert!(
+            create_sql_cursor(
+                &state,
+                id,
+                &connection,
+                "SELECT 1 AS x, 2 AS x FROM external"
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unique")
+        );
+        let direct = create_sql_cursor(&state, id, &connection, "SELECT blob FROM dataset")
+            .await
+            .unwrap();
+        assert_eq!(direct.media_columns.len(), 1);
     }
 }

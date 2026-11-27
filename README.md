@@ -201,16 +201,53 @@ Switching modes does not change the selected dataset snapshot.
 
 ![User mode SQL editor with incrementally streamed results](docs/images/user-mode-sql.png)
 
+### Query multiple datasets
+
+In the SQL panel, click **Add dataset**, enter an existing Lance dataset path or
+URI, and set **Use as** to a table name such as `recordings`. Names must be
+lowercase SQL identifiers; `dataset` is reserved for the selected snapshot.
+The table list shows each source, its version at registration, and column count.
+**Remove** unregisters the name without changing or deleting the source data.
+Registrations belong to the current connection, reset on reconnect, and have no
+fixed table-count limit. Sources use the same server-side filesystem access and
+cloud credentials as the existing dataset picker.
+
+```sql
+SELECT s.recording_id, s.transcript, r.sample_rate
+FROM dataset AS s
+LEFT JOIN recordings AS r ON s.recording_id = r.recording_id
+WHERE s.quality_score > 0.8
+LIMIT 100
+```
+
+Named tables use a query-local `LanceNamespace` and the official
+`lance-namespace-datafusion` adapter. JOINs, CTEs, subqueries, filtering, and
+aggregations run through DataFusion. Each query copies the registered source map
+and binds each table on its first lookup, including repeated table references.
+`dataset` keeps the branch/version selected in the picker. Additional tables open
+at Latest for each new query; the displayed registration version is not a fixed
+checkout. Active streams keep their snapshots after source appends or removal of
+a table registration. Snapshots are independent across tables; old files must
+remain available for active queries.
+
+Only one read-only statement is accepted. Register sources through the UI rather
+than SQL table functions. Output column names must be unique; use `AS` for
+collisions. Named-table results support metadata and ordinary binary values;
+Lance Blob output, including nested Blob fields, is rejected because cross-table
+media provenance is not implemented. Query `dataset` alone for the existing media
+previews. The result row cap does not bound JOIN memory or input scans. Include
+pack identity when joining IDs that are only unique within a pack.
+
 ### Cursor-paginated SQL
 
-Both modes run DataFusion SQL against a read-only table named `dataset`. The
-default query is:
+Both modes expose the selected snapshot as the read-only table `dataset`, alongside
+any registered named tables. The default query is:
 
 ```sql
 SELECT * FROM dataset
 ```
 
-Only `SELECT` and `WITH` queries are accepted. Each query runs once and creates
+Only one read-only query is accepted. Each query runs once and creates
 a server-side cursor. The browser pulls 20 rows at a time from that cursor as
 the user scrolls, retaining at most 10,000 rows. Page sequence numbers make
 retries idempotent after a network timeout; applying another query or switching

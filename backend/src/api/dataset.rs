@@ -477,7 +477,9 @@ mod tests {
         )
         .unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let uri = format!("memory://opening-test-{}", Uuid::new_v4());
+        // Discovery reopens the source through a separate object store.
+        let root = tempfile::tempdir().unwrap();
+        let uri = root.path().join("opening-test.lance").display().to_string();
         let mut dataset = Dataset::write(
             reader,
             &uri,
