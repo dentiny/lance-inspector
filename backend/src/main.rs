@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         .route("/file", get(api::file_preview))
         .route("/transaction", get(api::transaction))
         .route("/rows", get(api::rows))
+        .merge(api::namespace_routes())
         .route("/sql/start", post(api::start_sql))
         .route("/sql/{cursor_id}/page", get(api::sql_page))
         .route("/sql/{cursor_id}/cancel", post(api::cancel_sql))

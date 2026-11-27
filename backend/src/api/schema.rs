@@ -85,6 +85,20 @@ pub(super) fn sql_columns(
     }
 }
 
+pub(super) fn contains_blob(field: &Field) -> bool {
+    if is_blob_field(field) {
+        return true;
+    }
+    match field.data_type() {
+        DataType::List(item)
+        | DataType::LargeList(item)
+        | DataType::FixedSizeList(item, _)
+        | DataType::Map(item, _) => contains_blob(item),
+        DataType::Struct(fields) => fields.iter().any(|child| contains_blob(child)),
+        _ => false,
+    }
+}
+
 pub(super) fn is_blob_field(field: &Field) -> bool {
     field
         .metadata()

@@ -646,3 +646,15 @@ tbody tr:hover td { background: rgba(98,200,212,.025); }
 .latex-paper pre { white-space: pre-wrap; }
 .latex-paper .texttt { font-family: var(--mono); }
 @media (max-width: 700px) { .latex-paper { padding: 20px; } .latex-paper .latex-abstract { margin-inline: 0; } }
+
+.sql-tables { padding: 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.sql-table-heading, .sql-table-entry { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sql-tables p { color: var(--faint); line-height: 1.6; }
+.sql-table-entry { padding: 8px 0; }
+.sql-table-entry > div { display: grid; gap: 4px; min-width: 0; }
+.sql-table-entry span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sql-table-entry small { color: var(--faint); }
+.sql-panel .sql-attach-form { display: grid; grid-template-columns: 2fr 1fr auto; gap: 10px; padding: 10px 0; align-items: end; }
+.sql-attach-form label { display: grid; gap: 5px; min-width: 0; }
+.sql-attach-form input, .sql-attach-form select { width: 100%; box-sizing: border-box; padding: 8px; background: #090d12; color: #dce4ed; border: 1px solid #34404d; border-radius: 6px; }
+@media (max-width: 800px) { .sql-panel .sql-attach-form { grid-template-columns: 1fr; } }

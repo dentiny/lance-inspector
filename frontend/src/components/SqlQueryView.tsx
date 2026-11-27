@@ -5,6 +5,7 @@ import type { DatasetInfo, SqlCursorResponse, SqlPageResponse, TableData } from 
 import { PageHeading } from '../ui'
 import { DatasetStructure } from './DatasetStructure'
 import { RowsTable } from './RowsTable'
+import { SqlTables } from './SqlTables'
 
 const DEFAULT_SQL = 'SELECT * FROM dataset'
 const MAX_SQL_RESULT_ROWS = 10_000
@@ -157,6 +158,7 @@ function SqlQueryView({ connectionId, datasetKey }: { connectionId: string; data
           <div><span className="eyebrow">DataFusion · read only</span><h2>SQL query</h2></div>
           <code>table: dataset</code>
         </div>
+        <SqlTables key={connectionId} connectionId={connectionId} />
         <form onSubmit={submit}>
           <textarea
             value={sql}
