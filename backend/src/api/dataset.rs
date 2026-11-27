@@ -6,7 +6,12 @@ use axum::{
     Json,
     extract::{Query, State},
 };
-use lance::{Dataset, index::DatasetIndexExt};
+use futures::{StreamExt, TryStreamExt, stream};
+use lance::{
+    Dataset,
+    dataset::{fragment::FileFragment, refs::BranchContents},
+    index::DatasetIndexExt,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -23,6 +28,8 @@ use super::{
 
 // Maximum number of deleted row offsets included in the UI preview.
 const MAX_DELETION_OFFSETS: usize = 2_000;
+// Bound storage fan-out while overlapping independent metadata reads.
+const METADATA_LOAD_CONCURRENCY: usize = 16;
 
 pub(crate) async fn dataset_info(
     State(state): State<Arc<AppState>>,
@@ -60,8 +67,8 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
             .await
             .with_context(|| format!("failed to open Lance dataset {uri}"))?,
     );
-    let branch_contents = root.list_branches().await?;
-    let tag_contents = root.tags().list().await?;
+    let (branch_contents, tag_contents) =
+        tokio::try_join!(root.list_branches(), async { root.tags().list().await })?;
 
     let mut tags: Vec<_> = tag_contents
         .into_iter()
@@ -77,43 +84,14 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
     branch_names.sort();
     branch_names.insert(0, "main".to_string());
 
-    let mut branches = Vec::with_capacity(branch_names.len());
-    for name in branch_names {
-        let dataset = if name == "main" {
-            root.as_ref().clone()
-        } else {
-            root.checkout_branch(&name).await?
-        };
-        let loaded_version = dataset.version();
-        let versions = dataset
-            .version_refs()
-            .await?
-            .into_iter()
-            .map(|version| VersionView {
-                version: version.version,
-                total_rows: (version.version == loaded_version.version)
-                    .then(|| {
-                        loaded_version
-                            .metadata
-                            .get("total_rows")
-                            .and_then(|value| value.parse().ok())
-                    })
-                    .flatten(),
-                tags: tags
-                    .iter()
-                    .filter(|tag| tag.branch == name && tag.version == version.version)
-                    .map(|tag| tag.name.clone())
-                    .collect(),
-            })
-            .collect();
-        let metadata = branch_contents.get(&name);
-        branches.push(BranchHistory {
-            name,
-            parent_branch: metadata.and_then(|branch| branch.parent_branch.clone()),
-            parent_version: metadata.map(|branch| branch.parent_version),
-            versions,
-        });
-    }
+    let branches = stream::iter(branch_names)
+        .map(|name| {
+            let branch = branch_contents.get(&name);
+            load_branch_history(&root, name, branch, &tags)
+        })
+        .buffered(METADATA_LOAD_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
 
     let discovery_id = Uuid::new_v4();
     state
@@ -124,6 +102,47 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
         uri: uri.to_string(),
         branches,
         tags,
+    })
+}
+
+async fn load_branch_history(
+    root: &Dataset,
+    name: String,
+    branch: Option<&BranchContents>,
+    tags: &[TagView],
+) -> Result<BranchHistory> {
+    let dataset = if name == "main" {
+        root.clone()
+    } else {
+        root.checkout_branch(&name).await?
+    };
+    let loaded_version = dataset.version();
+    let versions = dataset
+        .version_refs()
+        .await?
+        .into_iter()
+        .map(|version| VersionView {
+            version: version.version,
+            total_rows: (version.version == loaded_version.version)
+                .then(|| {
+                    loaded_version
+                        .metadata
+                        .get("total_rows")
+                        .and_then(|value| value.parse().ok())
+                })
+                .flatten(),
+            tags: tags
+                .iter()
+                .filter(|tag| tag.branch == name && tag.version == version.version)
+                .map(|tag| tag.name.clone())
+                .collect(),
+        })
+        .collect();
+    Ok(BranchHistory {
+        name,
+        parent_branch: branch.and_then(|branch| branch.parent_branch.clone()),
+        parent_version: branch.map(|branch| branch.parent_version),
+        versions,
     })
 }
 
@@ -220,6 +239,74 @@ async fn resolve_reference(root: Arc<Dataset>, reference: &str) -> Result<Arc<Da
     .with_context(|| format!("failed to check out {target}"))?;
     Ok(Arc::new(dataset))
 }
+
+async fn build_fragment_view(file_fragment: FileFragment) -> Result<FragmentView> {
+    let physical_rows = file_fragment.physical_rows().await?;
+    let metadata = file_fragment.metadata();
+    let (deletion, deleted_rows) = if let Some(deletion_file) = &metadata.deletion_file {
+        let vector = file_fragment.get_deletion_vector().await?;
+        let (count, offsets) = if let Some(vector) = vector.as_deref() {
+            let count = vector.len();
+            let mut offsets = Vec::new();
+            if count > 0 {
+                offsets.reserve(count.min(MAX_DELETION_OFFSETS));
+                offsets.extend(vector.iter().take(MAX_DELETION_OFFSETS));
+            }
+            (count, offsets)
+        } else {
+            (0, Vec::new())
+        };
+        let file_type = format!("{:?}", deletion_file.file_type);
+        let extension = if file_type.to_ascii_lowercase().contains("array") {
+            "arrow"
+        } else {
+            "bin"
+        };
+        (
+            Some(DeletionView {
+                path: format!(
+                    "_deletions/{}-{}-{}.{}",
+                    metadata.id, deletion_file.read_version, deletion_file.id, extension
+                ),
+                file_type,
+                read_version: deletion_file.read_version,
+                id: deletion_file.id,
+                count,
+                offsets,
+                offsets_truncated: count > MAX_DELETION_OFFSETS,
+            }),
+            count,
+        )
+    } else {
+        (None, 0)
+    };
+    let visible_rows = physical_rows.checked_sub(deleted_rows).with_context(|| {
+            format!(
+                "fragment {} reports {deleted_rows} deleted rows but only {physical_rows} physical rows",
+                metadata.id
+            )
+        })?;
+
+    Ok(FragmentView {
+        id: metadata.id,
+        physical_rows: Some(physical_rows),
+        visible_rows: Some(visible_rows),
+        files: metadata
+            .files
+            .iter()
+            .map(|file| DataFileView {
+                path: format!("data/{}", file.path),
+                fields: file.fields.to_vec(),
+                column_indices: file.column_indices.to_vec(),
+                format: format!("{}.{}", file.file_major_version, file.file_minor_version),
+                size_bytes: file.file_size_bytes.get().map(u64::from),
+                base_id: file.base_id,
+            })
+            .collect(),
+        deletion,
+    })
+}
+
 pub(super) async fn build_dataset_info(
     dataset: &Dataset,
     dataset_uri: &str,
@@ -278,75 +365,15 @@ pub(super) async fn build_dataset_info(
         })
         .collect();
 
-    let mut fragments = Vec::with_capacity(manifest.fragments.len());
-    let mut rows = 0usize;
-    for file_fragment in dataset.get_fragments() {
-        let physical_rows = file_fragment.physical_rows().await?;
-        let metadata = file_fragment.metadata();
-        let (deletion, deleted_rows) = if let Some(deletion_file) = &metadata.deletion_file {
-            let vector = file_fragment.get_deletion_vector().await?;
-            let (count, offsets) = if let Some(vector) = vector.as_deref() {
-                let count = vector.len();
-                let mut offsets = Vec::new();
-                if count > 0 {
-                    offsets.reserve(count.min(MAX_DELETION_OFFSETS));
-                    offsets.extend(vector.iter().take(MAX_DELETION_OFFSETS));
-                }
-                (count, offsets)
-            } else {
-                (0, Vec::new())
-            };
-            let file_type = format!("{:?}", deletion_file.file_type);
-            let extension = if file_type.to_ascii_lowercase().contains("array") {
-                "arrow"
-            } else {
-                "bin"
-            };
-            (
-                Some(DeletionView {
-                    path: format!(
-                        "_deletions/{}-{}-{}.{}",
-                        metadata.id, deletion_file.read_version, deletion_file.id, extension
-                    ),
-                    file_type,
-                    read_version: deletion_file.read_version,
-                    id: deletion_file.id,
-                    count,
-                    offsets,
-                    offsets_truncated: count > MAX_DELETION_OFFSETS,
-                }),
-                count,
-            )
-        } else {
-            (None, 0)
-        };
-        let visible_rows = physical_rows.checked_sub(deleted_rows).with_context(|| {
-            format!(
-                "fragment {} reports {deleted_rows} deleted rows but only {physical_rows} physical rows",
-                metadata.id
-            )
-        })?;
-        rows += visible_rows;
-
-        fragments.push(FragmentView {
-            id: metadata.id,
-            physical_rows: Some(physical_rows),
-            visible_rows: Some(visible_rows),
-            files: metadata
-                .files
-                .iter()
-                .map(|file| DataFileView {
-                    path: format!("data/{}", file.path),
-                    fields: file.fields.to_vec(),
-                    column_indices: file.column_indices.to_vec(),
-                    format: format!("{}.{}", file.file_major_version, file.file_minor_version),
-                    size_bytes: file.file_size_bytes.get().map(u64::from),
-                    base_id: file.base_id,
-                })
-                .collect(),
-            deletion,
-        });
-    }
+    let fragments = stream::iter(dataset.get_fragments())
+        .map(build_fragment_view)
+        .buffered(METADATA_LOAD_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let rows = fragments
+        .iter()
+        .map(|fragment| fragment.visible_rows.unwrap_or(0))
+        .sum();
 
     let manifest_location = dataset.manifest_location();
     Ok(DatasetInfo {
@@ -435,5 +462,81 @@ mod tests {
 
         assert!(Arc::ptr_eq(&discovered_root, &connection.dataset));
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_metadata_preserves_order_deletions_and_references() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from_iter_values(0..80))],
+        )
+        .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let uri = format!("memory://opening-test-{}", Uuid::new_v4());
+        let mut dataset = Dataset::write(
+            reader,
+            &uri,
+            Some(lance::dataset::write::WriteParams {
+                max_rows_per_file: 4,
+                max_rows_per_group: 4,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        dataset.delete("value % 4 = 0").await.unwrap();
+        let info = build_dataset_info(&dataset, &uri, "main").await.unwrap();
+        assert_eq!(info.rows, 60);
+        assert_eq!(info.fragments.len(), 20);
+        for (expected_id, fragment) in info.fragments.iter().enumerate() {
+            assert_eq!(fragment.id, expected_id as u64);
+            assert_eq!(fragment.physical_rows, Some(4));
+            assert_eq!(fragment.visible_rows, Some(3));
+            let deletion = fragment.deletion.as_ref().unwrap();
+            assert_eq!(deletion.count, 1);
+            assert_eq!(deletion.offsets, vec![0]);
+            assert!(!deletion.offsets_truncated);
+        }
+
+        let version = dataset.version().version;
+        dataset.tags().create("snapshot", version).await.unwrap();
+        for index in (0..20).rev() {
+            dataset
+                .create_branch(&format!("branch-{index:02}"), version, None)
+                .await
+                .unwrap();
+        }
+        let catalog = discover(&AppState::new(), DiscoverRequest { uri })
+            .await
+            .unwrap();
+        let expected_names: Vec<_> = std::iter::once("main".to_string())
+            .chain((0..20).map(|index| format!("branch-{index:02}")))
+            .collect();
+        assert_eq!(
+            catalog
+                .branches
+                .iter()
+                .map(|branch| branch.name.clone())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+        assert_eq!(catalog.tags.len(), 1);
+        assert_eq!(catalog.tags[0].name, "snapshot");
+        assert!(
+            catalog.branches[0]
+                .versions
+                .iter()
+                .any(|entry| entry.version == version && entry.tags == ["snapshot"])
+        );
+        for branch in &catalog.branches[1..] {
+            assert_eq!(branch.parent_version, Some(version));
+            assert!(!branch.versions.is_empty());
+            assert!(branch.versions.iter().all(|entry| entry.tags.is_empty()));
+        }
     }
 }

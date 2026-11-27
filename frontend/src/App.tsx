@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Braces,
   ChevronDown,
-  CircleAlert,
   Database,
   GitBranch,
   HardDrive,
@@ -26,8 +25,9 @@ function App() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [nextFileOffset, setNextFileOffset] = useState<number | null>(null)
   const [loadingFiles, setLoadingFiles] = useState(false)
+  const [filesRequested, setFilesRequested] = useState(false)
+  const [filesError, setFilesError] = useState('')
   const [selection, setSelection] = useState<Selection>({ type: 'overview' })
-  const [error, setError] = useState('')
   const [mode, setMode] = useState<'infra' | 'user'>('user')
   const [showConnector, setShowConnector] = useState(true)
   const [showReference, setShowReference] = useState(false)
@@ -46,35 +46,29 @@ function App() {
     return () => window.removeEventListener('lance-connection-expired', reconnect)
   }, [])
 
-  const loadFiles = async (nextConnection: ConnectedDataset, offset: number, append: boolean) => {
+  const loadFiles = useCallback(async (id: string, offset: number, append: boolean) => {
     if (!append) fileRequest.current?.abort()
     const controller = new AbortController()
     fileRequest.current = controller
     const generation = append ? fileGeneration.current : ++fileGeneration.current
     loadingFilesRef.current = true
-    setLoadingFiles(append)
+    setLoadingFiles(true)
     try {
       const page = await requestJson<FilesPage>(
-        connectedUrl(`/api/files?offset=${offset}&limit=${FILES_PAGE_SIZE}`, nextConnection.connection_id),
+        connectedUrl(`/api/files?offset=${offset}&limit=${FILES_PAGE_SIZE}`, id),
         { signal: controller.signal },
       )
       if (generation !== fileGeneration.current) return
+      setFilesError('')
       if (append) {
         setFiles((current) => [...current, ...page.entries])
         setNextFileOffset(page.next_offset)
         return
       }
-      setConnection(nextConnection)
-      if (pendingCatalog) setCatalog(pendingCatalog)
-      setPendingCatalog(undefined)
       setFiles(page.entries)
       setNextFileOffset(page.next_offset)
-      setSelection({ type: 'overview' })
-      setShowConnector(false)
-      setShowReference(false)
-      setError('')
     } catch (reason) {
-      if (!isAbortError(reason)) setError(errorMessage(reason))
+      if (generation === fileGeneration.current && !isAbortError(reason)) setFilesError(errorMessage(reason))
     } finally {
       if (generation === fileGeneration.current) {
         fileRequest.current = undefined
@@ -82,13 +76,41 @@ function App() {
         setLoadingFiles(false)
       }
     }
+  }, [])
+
+  const connected = (nextConnection: ConnectedDataset) => {
+    fileRequest.current?.abort()
+    fileRequest.current = undefined
+    ++fileGeneration.current
+    loadingFilesRef.current = false
+    setLoadingFiles(false)
+    setFilesRequested(false)
+    setFilesError('')
+    setFiles([])
+    setNextFileOffset(null)
+    setConnection(nextConnection)
+    if (pendingCatalog) setCatalog(pendingCatalog)
+    setPendingCatalog(undefined)
+    setSelection({ type: 'overview' })
+    setShowConnector(false)
+    setShowReference(false)
   }
 
-  const connected = (nextConnection: ConnectedDataset) => loadFiles(nextConnection, 0, false)
+  // Listing storage is only needed in Infra mode and must not delay dataset use.
+  useEffect(() => {
+    if (!connectionId || mode !== 'infra' || filesRequested) return
+    setFilesRequested(true)
+    void loadFiles(connectionId, 0, false)
+  }, [connectionId, mode, filesRequested, loadFiles])
+
+  useEffect(() => () => {
+    ++fileGeneration.current
+    fileRequest.current?.abort()
+  }, [])
 
   const loadMoreFiles = () => {
-    if (!connection || nextFileOffset === null || loadingFilesRef.current) return
-    void loadFiles(connection, nextFileOffset, true)
+    if (!connection || nextFileOffset === null || loadingFilesRef.current || filesError) return
+    void loadFiles(connection.connection_id, nextFileOffset, true)
   }
 
   const discovered = (nextCatalog: ReferenceCatalog) => {
@@ -97,9 +119,6 @@ function App() {
     if (info) setShowReference(true)
   }
 
-  if (error) {
-    return <main className="fatal"><CircleAlert /><h1>Unable to inspect dataset</h1><p>{error}</p><button onClick={() => { setError(''); setShowConnector(true) }}>Choose another dataset</button></main>
-  }
   if (!info && showConnector) {
     return <DatasetConnector onDiscovered={discovered} />
   }
@@ -152,6 +171,7 @@ function App() {
             </button>
           </nav>
           <div className="sidebar-label">Storage files <span>{files.length}</span></div>
+          {filesError && <div role="alert">{filesError}<button disabled={loadingFiles} onClick={() => void loadFiles(connectionId, nextFileOffset ?? 0, nextFileOffset !== null)}>Retry file listing</button></div>}
           <FileTree
             files={files}
             selected={selectedFile?.path}
