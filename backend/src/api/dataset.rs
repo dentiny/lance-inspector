@@ -29,7 +29,7 @@ use super::{
 // Maximum number of deleted row offsets included in the UI preview.
 const MAX_DELETION_OFFSETS: usize = 2_000;
 // Bound storage fan-out while overlapping independent metadata reads.
-const METADATA_CONCURRENCY: usize = 16;
+const METADATA_LOAD_CONCURRENCY: usize = 16;
 
 pub(crate) async fn dataset_info(
     State(state): State<Arc<AppState>>,
@@ -89,7 +89,7 @@ async fn discover(state: &AppState, request: DiscoverRequest) -> Result<Referenc
             let branch = branch_contents.get(&name);
             load_branch_history(&root, name, branch, &tags)
         })
-        .buffered(METADATA_CONCURRENCY)
+        .buffered(METADATA_LOAD_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
 
@@ -367,7 +367,7 @@ pub(super) async fn build_dataset_info(
 
     let fragments = stream::iter(dataset.get_fragments())
         .map(build_fragment_view)
-        .buffered(METADATA_CONCURRENCY)
+        .buffered(METADATA_LOAD_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
     let rows = fragments
